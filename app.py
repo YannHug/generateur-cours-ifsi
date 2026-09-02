@@ -96,7 +96,7 @@ def activer_autoscroll():
         defilerVersLeBas();
         </script>
         """,
-        height=0
+        height=1
     )
 
 
