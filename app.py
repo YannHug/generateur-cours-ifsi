@@ -2034,41 +2034,44 @@ un lien vers un fichier MP3 accessible.
 
 
     # ========================================================
-    # AFFICHAGE
+    # SAUVEGARDE EN SESSION (survit au clic sur "Télécharger")
     # ========================================================
+
+    st.session_state["fiche_generee"] = fiche
+
+    st.session_state["nom_fichier_docx"] = (
+        nettoyer_nom_fichier(titre_cours) + ".docx"
+    )
+
+
+# ============================================================
+# AFFICHAGE DU RÉSULTAT (hors du bloc bouton, pour survivre
+# au clic sur "Télécharger" qui relance le script)
+# ============================================================
+
+if st.session_state.get("fiche_generee"):
 
     st.success(
         "🎉 Ta fiche de révision est prête !"
     )
 
-
     st.markdown(
-        fiche
+        st.session_state["fiche_generee"]
     )
 
-
-    # ========================================================
-    # WORD
-    # ========================================================
 
     st.write(
         "### 📄 Télécharger la fiche"
     )
 
-
     buffer = creer_word(
-        fiche
-    )
-
-
-    nom_fichier_docx = (
-        nettoyer_nom_fichier(titre_cours) + ".docx"
+        st.session_state["fiche_generee"]
     )
 
     st.download_button(
         label="📥 Télécharger la fiche (.docx)",
         data=buffer,
-        file_name=nom_fichier_docx,
+        file_name=st.session_state["nom_fichier_docx"],
         mime=(
             "application/vnd.openxmlformats-"
             "officedocument.wordprocessingml.document"
