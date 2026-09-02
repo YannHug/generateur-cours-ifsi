@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import requests
 from bs4 import BeautifulSoup
 from google import genai
@@ -34,6 +35,44 @@ st.set_page_config(
 
 
 # ============================================================
+# FONCTION : AUTO-SCROLL PENDANT LE TRAITEMENT
+# ============================================================
+#
+# Streamlit ne fait pas défiler la page automatiquement quand
+# du nouveau contenu apparaît. On observe les changements du
+# DOM et on fait défiler vers le bas à chaque ajout, le temps
+# du traitement.
+# ============================================================
+
+def activer_autoscroll():
+
+    components.html(
+        """
+        <script>
+        function defilerVersLeBas() {
+            window.parent.scrollTo(
+                0,
+                window.parent.document.body.scrollHeight
+            );
+        }
+
+        const observateur = new MutationObserver(
+            defilerVersLeBas
+        );
+
+        observateur.observe(
+            window.parent.document.body,
+            { childList: true, subtree: true }
+        );
+
+        defilerVersLeBas();
+        </script>
+        """,
+        height=0
+    )
+
+
+# ============================================================
 # FONCTION : TÉLÉCHARGER LE MP3
 # ============================================================
 
@@ -65,13 +104,6 @@ def obtenir_base_canonique(soup, url_page):
 
             base = f"{parsed.scheme}://{parsed.netloc}/"
 
-            if base != urllib.parse.urljoin(url_page, "/"):
-
-                st.write(
-                    f"↪️ Domaine canonique détecté : `{base}` "
-                    f"(différent de la page d'origine)"
-                )
-
             return base
 
     return url_page
@@ -94,6 +126,25 @@ DOMAINES_VIDEO = [
     "mediacenter.univ-lyon1.fr",
     "myvideo.univ-lyon1.fr",
 ]
+
+
+def nettoyer_nom_fichier(titre):
+
+    if not titre:
+
+        return "Cours_IFSI"
+
+    nom = re.sub(r'[\\/:*?"<>|]', "", titre)
+
+    nom = re.sub(r"\s+", " ", nom).strip()
+
+    nom = nom.replace(" - ", " - ")
+
+    if len(nom) > 120:
+
+        nom = nom[:120].rstrip()
+
+    return nom or "Cours_IFSI"
 
 
 def est_lien_video_direct(url):
@@ -124,6 +175,45 @@ def est_lien_video_direct(url):
     return False
 
 
+def extraire_titre_page(soup):
+
+    h1 = soup.find("h1")
+
+    titre_h1 = (
+        h1.get_text(strip=True)
+        if h1
+        else None
+    )
+
+
+    conteneur_chapitre = soup.find(
+        "div",
+        id="mod_book-chapter"
+    )
+
+    titre_h2 = None
+
+    if conteneur_chapitre:
+
+        h2 = conteneur_chapitre.find("h2")
+
+        if h2:
+
+            titre_h2 = h2.get_text(strip=True)
+
+
+    parties = [
+        t for t in (titre_h1, titre_h2)
+        if t
+    ]
+
+    if not parties:
+
+        return None
+
+    return " - ".join(parties)
+
+
 def extraire_liens_videos_page(url_page, session):
 
     try:
@@ -141,7 +231,7 @@ def extraire_liens_videos_page(url_page, session):
             f"❌ Impossible d'accéder à la page : {e}"
         )
 
-        return []
+        return [], None
 
 
     soup = BeautifulSoup(
@@ -173,12 +263,15 @@ def extraire_liens_videos_page(url_page, session):
             liens_trouves.append(href_absolu)
 
 
-    return liens_trouves
+    titre = extraire_titre_page(soup)
+
+    return liens_trouves, titre
 
 
 def developper_urls(urls, session):
 
     urls_finales = []
+    titre_cours = None
 
     for url in urls:
 
@@ -194,10 +287,15 @@ def developper_urls(urls, session):
             f"vidéos sur : {url}"
         )
 
-        liens = extraire_liens_videos_page(
+        liens, titre = extraire_liens_videos_page(
             url,
             session
         )
+
+        if titre_cours is None and titre:
+
+            titre_cours = titre
+
 
         if liens:
 
@@ -215,7 +313,7 @@ def developper_urls(urls, session):
             )
 
 
-    return urls_finales
+    return urls_finales, titre_cours
 
 
 def telecharger_mp3(url_page, index, session):
@@ -278,7 +376,7 @@ def telecharger_mp3(url_page, index, session):
 
 
     st.write(
-        f"🔗 MP3 trouvé : `{url_mp3}`"
+        "🔗 Fichier MP3 trouvé"
     )
 
 
@@ -324,13 +422,6 @@ def telecharger_mp3(url_page, index, session):
     taille_octets = len(audio_response.content)
 
     if "audio" not in content_type or taille_octets < 100_000:
-
-        st.write(
-            f"↪️ Le MP3 direct ne semble pas valide "
-            f"(Content-Type : `{content_type}`, "
-            f"taille : {taille_octets / 1024:.1f} Ko) — "
-            f"tentative via le flux HLS."
-        )
 
         return None
 
@@ -647,10 +738,7 @@ def recuperer_audio_via_modes(url_page, index, session):
 
 
     st.write(
-        f"🔗 Média trouvé via l'API (qualité "
-        f"`{meilleure_qualite}`, format "
-        f"`{ressource.get('format')}`) : "
-        f"`{ressource['url']}`"
+        f"🔗 Média trouvé (qualité {meilleure_qualite})"
     )
 
 
@@ -979,7 +1067,7 @@ def creer_fiche_finale(
 
     st.write(
         "### 🧠 Analyse des audios et création de la "
-        "fiche de révision (un seul appel Gemini)"
+        "fiche de révision"
     )
 
 
@@ -1639,7 +1727,7 @@ if st.button(
     # DÉVELOPPEMENT DES URLS (pages de cours → liens vidéo)
     # --------------------------------------------------------
 
-    urls = developper_urls(
+    urls, titre_cours = developper_urls(
         urls,
         session
     )
@@ -1720,6 +1808,8 @@ https://aistudio.google.com/apikey
     # ========================================================
     # TRAITEMENT
     # ========================================================
+
+    activer_autoscroll()
 
     debut_total = time.time()
 
@@ -1943,10 +2033,14 @@ un lien vers un fichier MP3 accessible.
     )
 
 
+    nom_fichier_docx = (
+        nettoyer_nom_fichier(titre_cours) + ".docx"
+    )
+
     st.download_button(
         label="📥 Télécharger la fiche (.docx)",
         data=buffer,
-        file_name="Cours_IFSI.docx",
+        file_name=nom_fichier_docx,
         mime=(
             "application/vnd.openxmlformats-"
             "officedocument.wordprocessingml.document"
