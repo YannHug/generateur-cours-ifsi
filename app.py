@@ -1,5 +1,4 @@
 import streamlit as st
-import streamlit.components.v1 as components
 import requests
 from bs4 import BeautifulSoup
 from google import genai
@@ -46,13 +45,42 @@ st.set_page_config(
 
 def activer_autoscroll():
 
-    components.html(
+    st.iframe(
         """
         <script>
+        function trouverConteneurDefilant(doc) {
+            const selecteurs = [
+                '[data-testid="stAppViewContainer"]',
+                '[data-testid="stMain"]',
+                'section.main',
+                'div.main'
+            ];
+
+            for (const sel of selecteurs) {
+                const el = doc.querySelector(sel);
+                if (el && el.scrollHeight > el.clientHeight) {
+                    return el;
+                }
+            }
+
+            return null;
+        }
+
         function defilerVersLeBas() {
+            const doc = window.parent.document;
+
+            const conteneur = trouverConteneurDefilant(doc);
+
+            if (conteneur) {
+                conteneur.scrollTop = conteneur.scrollHeight;
+            }
+
+            // Repli : on fait aussi défiler la fenêtre entière,
+            // au cas où le vrai conteneur défilant serait
+            // ailleurs (structure Streamlit qui peut varier).
             window.parent.scrollTo(
                 0,
-                window.parent.document.body.scrollHeight
+                doc.body.scrollHeight
             );
         }
 
