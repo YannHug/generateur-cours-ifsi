@@ -48,6 +48,8 @@ def activer_autoscroll():
     st.iframe(
         """
         <script>
+        let suivreLeBas = true;
+
         function trouverConteneurDefilant(doc) {
             const selecteurs = [
                 '[data-testid="stAppViewContainer"]',
@@ -66,9 +68,49 @@ def activer_autoscroll():
             return null;
         }
 
-        function defilerVersLeBas() {
-            const doc = window.parent.document;
+        function estPresDuBas(scrollTop, scrollHeight, hauteurVisible) {
+            const seuil = 120;
+            return (
+                scrollHeight - scrollTop - hauteurVisible < seuil
+            );
+        }
 
+        function surveillerDefilementManuel(doc, conteneur) {
+            const fenetre = window.parent;
+
+            function verifierPosition() {
+                if (conteneur) {
+                    suivreLeBas = estPresDuBas(
+                        conteneur.scrollTop,
+                        conteneur.scrollHeight,
+                        conteneur.clientHeight
+                    );
+                } else {
+                    suivreLeBas = estPresDuBas(
+                        fenetre.scrollY,
+                        doc.body.scrollHeight,
+                        fenetre.innerHeight
+                    );
+                }
+            }
+
+            if (conteneur) {
+                conteneur.addEventListener(
+                    'scroll', verifierPosition, { passive: true }
+                );
+            } else {
+                fenetre.addEventListener(
+                    'scroll', verifierPosition, { passive: true }
+                );
+            }
+        }
+
+        function defilerVersLeBas() {
+            if (!suivreLeBas) {
+                return;
+            }
+
+            const doc = window.parent.document;
             const conteneur = trouverConteneurDefilant(doc);
 
             if (conteneur) {
@@ -91,6 +133,11 @@ def activer_autoscroll():
         observateur.observe(
             window.parent.document.body,
             { childList: true, subtree: true }
+        );
+
+        surveillerDefilementManuel(
+            window.parent.document,
+            trouverConteneurDefilant(window.parent.document)
         );
 
         defilerVersLeBas();
@@ -1654,8 +1701,12 @@ urls_input = st.text_area(
 cle_api_utilisateur = st.text_input(
     "🔑 Ta clé API Gemini (gratuite)",
     type="password",
-    placeholder="ex : AIzaSyD-9xY2kLmN3pQ4rS5tU6vW7xY8zA9bC0",
-    help=(
+    placeholder="ex : AIzaSyD-9xY2kLmN3pQ4rS5tU6vW7xY8zA9bC0"
+)
+
+with st.expander("ℹ️ Comment obtenir ma clé API ?"):
+
+    st.write(
         "Obtiens une clé gratuite sur "
         "https://aistudio.google.com/apikey (aucune carte "
         "bancaire requise). Elle n'est jamais enregistrée "
@@ -1665,7 +1716,6 @@ cle_api_utilisateur = st.text_input(
         "\"Clés API\" d'AI Studio (icône de copie à côté de "
         "chaque clé) — pas besoin de la noter ailleurs."
     )
-)
 
 
 MODELES_DISPONIBLES = {
@@ -1681,8 +1731,12 @@ modele_choisi = st.selectbox(
     "🤖 Modèle Gemini",
     options=list(MODELES_DISPONIBLES.keys()),
     format_func=lambda cle: MODELES_DISPONIBLES[cle],
-    index=0,
-    help=(
+    index=0
+)
+
+with st.expander("ℹ️ Quelle différence entre les modèles ?"):
+
+    st.write(
         "D'après nos tests sur des cours à plusieurs "
         "sujets :\n\n"
         "• **Gemini 3.7 Flash** couvre systématiquement "
@@ -1694,7 +1748,6 @@ modele_choisi = st.selectbox(
         "thèmes distincts lors de nos tests. À réserver aux "
         "cours courts / à un seul sujet."
     )
-)
 
 
 # Note : pas d'authentification nécessaire — les liens MP3
