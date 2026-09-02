@@ -2068,12 +2068,25 @@ if st.session_state.get("fiche_generee"):
         st.session_state["fiche_generee"]
     )
 
-    st.download_button(
-        label="📥 Télécharger la fiche (.docx)",
-        data=buffer,
-        file_name=st.session_state["nom_fichier_docx"],
-        mime=(
-            "application/vnd.openxmlformats-"
-            "officedocument.wordprocessingml.document"
+    colonne_telecharger, colonne_recharger = st.columns(2)
+
+    with colonne_telecharger:
+
+        st.download_button(
+            label="📥 Télécharger la fiche (.docx)",
+            data=buffer,
+            file_name=st.session_state["nom_fichier_docx"],
+            mime=(
+                "application/vnd.openxmlformats-"
+                "officedocument.wordprocessingml.document"
+            )
         )
-    )
+
+    with colonne_recharger:
+
+        if st.button("🔄 Nouveau cours"):
+
+            st.session_state.pop("fiche_generee", None)
+            st.session_state.pop("nom_fichier_docx", None)
+
+            st.rerun()
