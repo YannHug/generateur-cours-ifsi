@@ -1661,10 +1661,9 @@ cle_api_utilisateur = st.text_input(
         "bancaire requise). Elle n'est jamais enregistrée "
         "par cette appli : utilisée uniquement le temps de "
         "cette session, dans ton navigateur.\n\n"
-        "⚠️ Le site ne la réaffiche qu'une seule fois à sa "
-        "création — pense à la copier dans un fichier texte "
-        "de ton côté pour pouvoir la réutiliser la prochaine "
-        "fois sans avoir à en regénérer une."
+        "💡 Tu peux la retrouver à tout moment sur la page "
+        "\"Clés API\" d'AI Studio (icône de copie à côté de "
+        "chaque clé) — pas besoin de la noter ailleurs."
     )
 )
 
