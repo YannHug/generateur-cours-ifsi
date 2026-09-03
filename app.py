@@ -14,12 +14,21 @@ from docx import Document
 from docx.shared import Pt, RGBColor
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
+from docx.enum.text import WD_BREAK
 
 
 class QuotaEpuiseeError(Exception):
     """Levée quand Gemini renvoie un 429 (quota gratuit
     épuisé) — distincte d'un 503 passager, car réessayer ne
     sert à rien avant la réinitialisation du quota."""
+    pass
+
+
+class ModeleIndisponibleError(Exception):
+    """Levée quand Gemini renvoie un 404 pour le modèle
+    demandé (identifiant retiré/déprécié côté Google) —
+    permanent comme le quota épuisé : réessayer le même
+    modèle ne sert à rien, il faut basculer vers un autre."""
     pass
 
 
@@ -1147,12 +1156,15 @@ def appeler_gemini_avec_reprise(client, model, contents, tentatives=4):
 
             message = str(e)
 
-            if (
-                getattr(e, "code", None) == 429
-                or "RESOURCE_EXHAUSTED" in message
-            ):
+            code = getattr(e, "code", None)
+
+            if code == 429 or "RESOURCE_EXHAUSTED" in message:
 
                 raise QuotaEpuiseeError(message) from e
+
+            if code == 404 or "NOT_FOUND" in message:
+
+                raise ModeleIndisponibleError(message) from e
 
             raise
 
@@ -1212,6 +1224,22 @@ touche tous les comptes gratuits, pas seulement le tien).
 - Si c'est urgent, une clé API liée à un compte avec
   facturation activée est nettement moins sujette à ce
   genre de saturation.
+"""
+    )
+
+
+def afficher_erreur_modele_indisponible():
+
+    st.error(
+        """
+❌ Ce modèle Gemini n'est plus disponible.
+
+Google retire ou renomme parfois des modèles. Ce n'est pas
+un problème temporaire — réessayer avec le même modèle ne
+fonctionnera pas.
+
+**Que faire :** utilise le bouton ci-dessous pour basculer
+vers un autre modèle de la chaîne de repli.
 """
     )
 
@@ -1665,6 +1693,10 @@ survolée pendant le cours.
 
         raise
 
+    except ModeleIndisponibleError:
+
+        raise
+
     except genai_errors.ServerError:
 
         raise
@@ -1777,6 +1809,10 @@ RÈGLES :
 
         raise
 
+    except ModeleIndisponibleError:
+
+        raise
+
     except genai_errors.ServerError:
 
         raise
@@ -1867,6 +1903,10 @@ NOTES DES DIFFÉRENTS LOTS
         )
 
     except QuotaEpuiseeError:
+
+        raise
+
+    except ModeleIndisponibleError:
 
         raise
 
@@ -2096,6 +2136,33 @@ def nettoyer_latex(texte):
     return texte
 
 
+MOTIF_BR = re.compile(r"<br\s*/?>", re.IGNORECASE)
+
+
+def ajouter_run_avec_sauts(paragraphe, texte, gras=False, italique=False):
+
+    # Convertit les <br> (ou <br/>, <br />) éventuellement
+    # présents dans le texte — notamment dans les cellules de
+    # tableau, où Gemini les utilise pour forcer un retour à
+    # la ligne en Markdown — en véritables sauts de ligne
+    # plutôt que de laisser la balise brute dans le document.
+
+    parties = MOTIF_BR.split(texte)
+
+    for i, partie in enumerate(parties):
+
+        if partie:
+
+            run = paragraphe.add_run(partie)
+
+            run.bold = gras
+            run.italic = italique
+
+        if i < len(parties) - 1:
+
+            paragraphe.add_run().add_break(WD_BREAK.LINE)
+
+
 def ajouter_texte_formate(paragraphe, texte):
 
     # Découpe le texte en segments gras (**...**) / italique
@@ -2118,31 +2185,31 @@ def ajouter_texte_formate(paragraphe, texte):
 
         if segment.startswith("**") and segment.endswith("**"):
 
-            run = paragraphe.add_run(segment[2:-2])
-
-            run.bold = True
+            ajouter_run_avec_sauts(
+                paragraphe, segment[2:-2], gras=True
+            )
 
         elif segment.startswith("__") and segment.endswith("__"):
 
-            run = paragraphe.add_run(segment[2:-2])
-
-            run.bold = True
+            ajouter_run_avec_sauts(
+                paragraphe, segment[2:-2], gras=True
+            )
 
         elif segment.startswith("*") and segment.endswith("*"):
 
-            run = paragraphe.add_run(segment[1:-1])
-
-            run.italic = True
+            ajouter_run_avec_sauts(
+                paragraphe, segment[1:-1], italique=True
+            )
 
         elif segment.startswith("_") and segment.endswith("_"):
 
-            run = paragraphe.add_run(segment[1:-1])
-
-            run.italic = True
+            ajouter_run_avec_sauts(
+                paragraphe, segment[1:-1], italique=True
+            )
 
         else:
 
-            paragraphe.add_run(segment)
+            ajouter_run_avec_sauts(paragraphe, segment)
 
 
 def est_ligne_tableau(ligne):
@@ -2713,8 +2780,8 @@ MODELES_DISPONIBLES = {
     "gemini-3.7-flash": (
         "Gemini 3.7 Flash — éprouvé, très fiable"
     ),
-    "gemini-2.5-flash": (
-        "Gemini 2.5 Flash — génération différente, bon repli"
+    "gemini-3.6-flash": (
+        "Gemini 3.6 Flash — génération précédente, bon repli"
     ),
     "gemini-3.5-flash-lite": (
         "Gemini 3.5 Flash-Lite — le plus léger"
@@ -2726,14 +2793,17 @@ MODELES_DISPONIBLES = {
 # quota journalier (429). Chaque modèle a son propre quota
 # séparé sur le niveau gratuit, donc basculer vers le suivant
 # de la chaîne peut débloquer la situation sans attendre ni
-# payer. Gemini 2.5 Flash est délibérément placé avant
-# 3.5 Flash-Lite : c'est une génération différente de 3.7/3.8,
-# donc probablement moins exposée à la même vague de forte
-# demande que la gamme 3.x.
+# payer.
+#
+# Note : gemini-2.5-flash a été retiré de cette liste — Google
+# a fermé ce modèle aux nouveaux comptes (404 NOT_FOUND,
+# message recommandant gemini-3.6-flash à la place). Toujours
+# vérifier qu'un modèle existe encore avant de l'ajouter à
+# cette chaîne : les identifiants de modèles Gemini évoluent.
 CHAINE_MODELES_SECOURS = [
     "gemini-3.8-flash",
     "gemini-3.7-flash",
-    "gemini-2.5-flash",
+    "gemini-3.6-flash",
     "gemini-3.5-flash-lite",
 ]
 
@@ -2772,10 +2842,9 @@ with st.expander("ℹ️ Quelle différence entre les modèles ?"):
         "• **Gemini 3.7 Flash** est celui qu'on a le plus "
         "testé : couvre systématiquement l'intégralité du "
         "contenu (aucun sujet oublié).\n\n"
-        "• **Gemini 2.5 Flash** est une génération "
-        "différente (pas 3.x) — un bon choix de repli si "
-        "3.7/3.8 sont saturés, puisqu'ils partagent "
-        "probablement moins la même charge.\n\n"
+        "• **Gemini 3.6 Flash** est la génération précédant "
+        "3.7/3.8 — un bon choix de repli si les tout derniers "
+        "modèles sont saturés.\n\n"
         "• **Gemini 3.5 Flash-Lite** est le plus léger, mais "
         "a parfois oublié une partie des sujets sur des "
         "cours couvrant plusieurs thèmes distincts lors de "
@@ -3096,7 +3165,11 @@ un lien vers un fichier MP3 accessible.
                 modele_choisi
             )
 
-        except (QuotaEpuiseeError, genai_errors.ServerError) as e:
+        except (
+            QuotaEpuiseeError,
+            genai_errors.ServerError,
+            ModeleIndisponibleError
+        ) as e:
 
             # On garde les fichiers déjà uploadés (pas de
             # nettoyage ici) pour permettre un nouvel essai
@@ -3114,6 +3187,10 @@ un lien vers un fichier MP3 accessible.
             if isinstance(e, QuotaEpuiseeError):
 
                 afficher_erreur_quota()
+
+            elif isinstance(e, ModeleIndisponibleError):
+
+                afficher_erreur_modele_indisponible()
 
             else:
 
@@ -3263,7 +3340,8 @@ if st.session_state.get("fichiers_geminis_en_attente"):
 
                     except (
                         QuotaEpuiseeError,
-                        genai_errors.ServerError
+                        genai_errors.ServerError,
+                        ModeleIndisponibleError
                     ):
 
                         echec_reprise = True
