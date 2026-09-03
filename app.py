@@ -289,6 +289,19 @@ def extraire_titre_page(soup):
     return " - ".join(parties)
 
 
+def est_lien_pdf(url):
+
+    try:
+
+        analyse = urllib.parse.urlparse(url)
+
+    except Exception:
+
+        return False
+
+    return analyse.path.lower().endswith(".pdf")
+
+
 def extraire_liens_videos_page(url_page, session):
 
     try:
@@ -306,7 +319,7 @@ def extraire_liens_videos_page(url_page, session):
             f"❌ Impossible d'accéder à la page : {e}"
         )
 
-        return [], None
+        return [], [], None
 
 
     soup = BeautifulSoup(
@@ -315,7 +328,8 @@ def extraire_liens_videos_page(url_page, session):
     )
 
 
-    liens_trouves = []
+    liens_videos = []
+    liens_pdf = []
     deja_vus = set()
 
     for lien in soup.find_all(
@@ -328,24 +342,33 @@ def extraire_liens_videos_page(url_page, session):
             lien["href"]
         )
 
-        if (
-            est_lien_video_direct(href_absolu)
-            and href_absolu not in deja_vus
-        ):
+        if href_absolu in deja_vus:
+
+            continue
+
+
+        if est_lien_video_direct(href_absolu):
 
             deja_vus.add(href_absolu)
 
-            liens_trouves.append(href_absolu)
+            liens_videos.append(href_absolu)
+
+        elif est_lien_pdf(href_absolu):
+
+            deja_vus.add(href_absolu)
+
+            liens_pdf.append(href_absolu)
 
 
     titre = extraire_titre_page(soup)
 
-    return liens_trouves, titre
+    return liens_videos, liens_pdf, titre
 
 
 def developper_urls(urls, session):
 
     urls_finales = []
+    pdfs_finaux = []
     titre_cours = None
 
     for url in urls:
@@ -362,7 +385,7 @@ def developper_urls(urls, session):
             f"vidéos sur : {url}"
         )
 
-        liens, titre = extraire_liens_videos_page(
+        liens_videos, liens_pdf, titre = extraire_liens_videos_page(
             url,
             session
         )
@@ -372,14 +395,14 @@ def developper_urls(urls, session):
             titre_cours = titre
 
 
-        if liens:
+        if liens_videos:
 
             st.write(
-                f"✅ {len(liens)} vidéo(s) trouvée(s) sur "
-                f"cette page."
+                f"✅ {len(liens_videos)} vidéo(s) trouvée(s) "
+                f"sur cette page."
             )
 
-            urls_finales.extend(liens)
+            urls_finales.extend(liens_videos)
 
         else:
 
@@ -388,7 +411,17 @@ def developper_urls(urls, session):
             )
 
 
-    return urls_finales, titre_cours
+        if liens_pdf:
+
+            st.write(
+                f"📄 {len(liens_pdf)} support(s) PDF trouvé(s) "
+                f"sur cette page."
+            )
+
+            pdfs_finaux.extend(liens_pdf)
+
+
+    return urls_finales, pdfs_finaux, titre_cours
 
 
 def telecharger_mp3(url_page, index, session):
@@ -1119,6 +1152,124 @@ def uploader_audio_gemini(
 
 
 # ============================================================
+# FONCTION : TÉLÉCHARGER ET ENVOYER UN PDF SUPPORT À GEMINI
+# ============================================================
+#
+# Les diapositives (PDF "Support" liés sur la page de cours)
+# contiennent parfois des informations que le professeur n'a
+# pas développées à l'oral. On les envoie à Gemini aux côtés
+# des audios pour enrichir la fiche finale.
+# ============================================================
+
+def telecharger_et_uploader_pdf(url_pdf, index, session, client):
+
+    try:
+
+        reponse = session.get(
+            url_pdf,
+            timeout=60
+        )
+
+        reponse.raise_for_status()
+
+    except Exception as e:
+
+        st.write(
+            f"⚠️ Support PDF {index} inaccessible : {e}"
+        )
+
+        return None
+
+
+    content_type = reponse.headers.get(
+        "Content-Type", ""
+    ).lower()
+
+    if (
+        "pdf" not in content_type
+        and not reponse.content[:4] == b"%PDF"
+    ):
+
+        st.write(
+            f"⚠️ Support {index} ne semble pas être un PDF "
+            f"valide — ignoré."
+        )
+
+        return None
+
+
+    nom_fichier = f"support_{index}.pdf"
+
+    try:
+
+        with open(nom_fichier, "wb") as f:
+
+            f.write(reponse.content)
+
+    except Exception as e:
+
+        st.write(
+            f"⚠️ Impossible d'enregistrer le support {index} : {e}"
+        )
+
+        return None
+
+
+    st.write(
+        f"⬆️ Envoi du support PDF {index} à Gemini..."
+    )
+
+    try:
+
+        fichier = client.files.upload(
+            file=nom_fichier
+        )
+
+    except Exception as e:
+
+        st.write(
+            f"⚠️ Erreur d'upload du support {index} : {e}"
+        )
+
+        return None
+
+    finally:
+
+        try:
+
+            os.remove(nom_fichier)
+
+        except Exception:
+
+            pass
+
+
+    fichier_pret = attendre_fichier(
+        client,
+        fichier
+    )
+
+    if fichier_pret is None:
+
+        try:
+
+            client.files.delete(name=fichier.name)
+
+        except Exception:
+
+            pass
+
+        return None
+
+
+    st.success(
+        f"✅ Support PDF {index} envoyé et prêt."
+    )
+
+    return fichier_pret
+
+
+# ============================================================
 # FONCTION : CRÉER LA FICHE FINALE (un seul appel Gemini,
 # avec tous les fichiers audio directement en entrée)
 # ============================================================
@@ -1150,15 +1301,27 @@ def creer_fiche_finale(
 Tu es un formateur expert en Institut de Formation
 en Soins Infirmiers (IFSI).
 
-Tu vas écouter un ou plusieurs enregistrements audio
+Tu vas recevoir un ou plusieurs enregistrements audio
 appartenant au même cours (éventuellement en plusieurs
-parties). Écoute-les directement — ne produis PAS de
-retranscription intermédiaire, rédige directement la fiche
-de révision finale.
+parties), et éventuellement les PDF des diapositives
+("supports") utilisées pendant ce cours.
 
-À partir de l'écoute de ces audios, crée une fiche de
-révision complète, claire et pédagogique destinée à des
-étudiants infirmiers.
+Écoute les audios ET lis attentivement les PDF fournis —
+ne produis PAS de retranscription intermédiaire, rédige
+directement la fiche de révision finale.
+
+IMPORTANT : certaines informations (listes, exemples,
+pathologies citées) peuvent apparaître UNIQUEMENT sur une
+diapositive du PDF sans avoir été développées à l'oral, ou
+inversement UNIQUEMENT à l'oral sans être écrites sur la
+diapositive. Croise systématiquement les deux sources et
+n'omets aucune diapositive contenant une liste ou des
+exemples cliniques, même si elle n'a été que brièvement
+survolée pendant le cours.
+
+À partir de l'écoute des audios et de la lecture des PDF,
+crée une fiche de révision complète, claire et pédagogique
+destinée à des étudiants infirmiers.
 
 ==============================
 STRUCTURE OBLIGATOIRE
@@ -1223,7 +1386,8 @@ avec les éléments indispensables à mémoriser.
 RÈGLES
 ==============================
 
-- Reste fidèle au contenu des audios, n'invente aucune
+- Reste fidèle au contenu des audios et des PDF fournis,
+  n'invente aucune
   information.
 - Si plusieurs audios sont fournis, fusionne les
   informations et supprime les répétitions.
@@ -1807,7 +1971,7 @@ if st.button(
     # DÉVELOPPEMENT DES URLS (pages de cours → liens vidéo)
     # --------------------------------------------------------
 
-    urls, titre_cours = developper_urls(
+    urls, pdfs_detectes, titre_cours = developper_urls(
         urls,
         session
     )
@@ -1994,6 +2158,32 @@ https://aistudio.google.com/apikey
                 fichiers_geminis.append(
                     fichier_gemini
                 )
+
+
+        # ----------------------------------------------------
+        # PDF SUPPORT (diapositives, si trouvées sur la page)
+        # ----------------------------------------------------
+
+        if pdfs_detectes:
+
+            st.write(
+                f"## 📄 Supports PDF ({len(pdfs_detectes)})"
+            )
+
+            for j, url_pdf in enumerate(pdfs_detectes):
+
+                fichier_pdf_gemini = telecharger_et_uploader_pdf(
+                    url_pdf,
+                    j + 1,
+                    session,
+                    client
+                )
+
+                if fichier_pdf_gemini:
+
+                    fichiers_geminis.append(
+                        fichier_pdf_gemini
+                    )
 
 
         # ====================================================
