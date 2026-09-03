@@ -1838,81 +1838,67 @@ NOTES DES DIFFÉRENTS LOTS
 
 def generer_fiche_finale(client, fichiers_geminis, model_name):
 
-    try:
+    if len(fichiers_geminis) <= TAILLE_MAX_SOUS_LOT:
 
-        if len(fichiers_geminis) <= TAILLE_MAX_SOUS_LOT:
-
-            return creer_fiche_finale(
-                client,
-                fichiers_geminis,
-                model_name
-            )
-
-
-        st.write(
-            f"↪️ {len(fichiers_geminis)} fichiers au total — "
-            f"découpage en sous-lots de {TAILLE_MAX_SOUS_LOT} "
-            f"maximum pour rester sous les plafonds de l'API."
-        )
-
-        sous_lots = [
-            fichiers_geminis[i:i + TAILLE_MAX_SOUS_LOT]
-            for i in range(
-                0, len(fichiers_geminis), TAILLE_MAX_SOUS_LOT
-            )
-        ]
-
-        notes_par_lot = []
-
-        for i, sous_lot in enumerate(sous_lots):
-
-            notes = creer_notes_sous_lot(
-                client,
-                sous_lot,
-                model_name,
-                i + 1,
-                len(sous_lots)
-            )
-
-            if notes:
-
-                notes_par_lot.append(notes)
-
-            else:
-
-                st.warning(
-                    f"⚠️ Le lot {i + 1}/{len(sous_lots)} n'a pas "
-                    f"pu être analysé — il sera absent de la "
-                    f"fiche finale."
-                )
-
-
-        if not notes_par_lot:
-
-            st.error(
-                "❌ Aucun lot n'a pu être analysé."
-            )
-
-            return None
-
-
-        return creer_fiche_depuis_notes(
+        return creer_fiche_finale(
             client,
-            notes_par_lot,
+            fichiers_geminis,
             model_name
         )
 
-    except QuotaEpuiseeError:
 
-        afficher_erreur_quota()
+    st.write(
+        f"↪️ {len(fichiers_geminis)} fichiers au total — "
+        f"découpage en sous-lots de {TAILLE_MAX_SOUS_LOT} "
+        f"maximum pour rester sous les plafonds de l'API."
+    )
+
+    sous_lots = [
+        fichiers_geminis[i:i + TAILLE_MAX_SOUS_LOT]
+        for i in range(
+            0, len(fichiers_geminis), TAILLE_MAX_SOUS_LOT
+        )
+    ]
+
+    notes_par_lot = []
+
+    for i, sous_lot in enumerate(sous_lots):
+
+        notes = creer_notes_sous_lot(
+            client,
+            sous_lot,
+            model_name,
+            i + 1,
+            len(sous_lots)
+        )
+
+        if notes:
+
+            notes_par_lot.append(notes)
+
+        else:
+
+            st.warning(
+                f"⚠️ Le lot {i + 1}/{len(sous_lots)} n'a pas "
+                f"pu être analysé — il sera absent de la "
+                f"fiche finale."
+            )
+
+
+    if not notes_par_lot:
+
+        st.error(
+            "❌ Aucun lot n'a pu être analysé."
+        )
 
         return None
 
-    except genai_errors.ServerError:
 
-        afficher_erreur_surcharge()
-
-        return None
+    return creer_fiche_depuis_notes(
+        client,
+        notes_par_lot,
+        model_name
+    )
 
 
 # ============================================================
@@ -2666,6 +2652,16 @@ MODELES_DISPONIBLES = {
     ),
 }
 
+# Modèle de repli proposé quand le modèle choisi devient
+# indisponible (503 persistant) ou a épuisé son quota
+# journalier (429) — chaque modèle a son propre quota séparé
+# sur le niveau gratuit, donc basculer peut débloquer la
+# situation sans attendre ni payer.
+MODELE_SECOURS = {
+    "gemini-3.7-flash": "gemini-3.5-flash-lite",
+    "gemini-3.5-flash-lite": "gemini-3.7-flash",
+}
+
 modele_choisi = st.selectbox(
     "🤖 Modèle Gemini",
     options=list(MODELES_DISPONIBLES.keys()),
@@ -2992,11 +2988,44 @@ un lien vers un fichier MP3 accessible.
 
         debut_fiche = time.time()
 
-        fiche = generer_fiche_finale(
-            client,
-            fichiers_geminis,
-            modele_choisi
-        )
+        try:
+
+            fiche = generer_fiche_finale(
+                client,
+                fichiers_geminis,
+                modele_choisi
+            )
+
+        except (QuotaEpuiseeError, genai_errors.ServerError) as e:
+
+            # On garde les fichiers déjà uploadés (pas de
+            # nettoyage ici) pour permettre un nouvel essai
+            # avec un autre modèle sans tout re-télécharger.
+            st.session_state["fichiers_geminis_en_attente"] = (
+                fichiers_geminis
+            )
+
+            st.session_state["modele_echoue"] = modele_choisi
+
+            st.session_state["titre_cours_en_attente"] = (
+                titre_cours
+            )
+
+            if isinstance(e, QuotaEpuiseeError):
+
+                afficher_erreur_quota()
+
+            else:
+
+                afficher_erreur_surcharge()
+
+            status.update(
+                label="❌ Gemini indisponible",
+                state="error",
+                expanded=True
+            )
+
+            st.stop()
 
         duree_fiche = time.time() - debut_fiche
 
@@ -3059,6 +3088,129 @@ un lien vers un fichier MP3 accessible.
     st.session_state["nom_fichier_docx"] = (
         nettoyer_nom_fichier(titre_cours) + ".docx"
     )
+
+
+# ============================================================
+# REPRISE AVEC MODÈLE DE SECOURS (hors du bloc bouton, pour
+# rester actionnable après un échec quota/surcharge)
+# ============================================================
+
+if st.session_state.get("fichiers_geminis_en_attente"):
+
+    modele_echoue = st.session_state.get("modele_echoue")
+    modele_secours = MODELE_SECOURS.get(modele_echoue)
+
+    if modele_secours:
+
+        libelle_secours = MODELES_DISPONIBLES.get(
+            modele_secours, modele_secours
+        )
+
+        if st.button(
+            f"🔄 Réessayer avec {libelle_secours}"
+        ):
+
+            cle_api_reprise = (
+                cle_api_utilisateur.strip()
+                if cle_api_utilisateur
+                else None
+            )
+
+            if not cle_api_reprise:
+
+                try:
+
+                    cle_api_reprise = st.secrets[
+                        "GEMINI_API_KEY"
+                    ]
+
+                except Exception:
+
+                    cle_api_reprise = None
+
+            if not cle_api_reprise:
+
+                st.error(
+                    "❌ Clé API introuvable pour réessayer — "
+                    "recolle-la dans le champ ci-dessus."
+                )
+
+            else:
+
+                fichiers_en_attente = st.session_state[
+                    "fichiers_geminis_en_attente"
+                ]
+
+                client_reprise = genai.Client(
+                    api_key=cle_api_reprise
+                )
+
+                fiche_reprise = None
+
+                with st.spinner(
+                    f"Nouvelle tentative avec "
+                    f"{libelle_secours}..."
+                ):
+
+                    try:
+
+                        fiche_reprise = generer_fiche_finale(
+                            client_reprise,
+                            fichiers_en_attente,
+                            modele_secours
+                        )
+
+                    except (
+                        QuotaEpuiseeError,
+                        genai_errors.ServerError
+                    ):
+
+                        st.error(
+                            f"❌ {libelle_secours} est lui "
+                            f"aussi indisponible pour "
+                            f"l'instant. Réessaie plus tard."
+                        )
+
+
+                # Nettoyage des fichiers, qu'il y ait eu
+                # succès ou échec cette fois
+                for fichier_gemini in fichiers_en_attente:
+
+                    try:
+
+                        client_reprise.files.delete(
+                            name=fichier_gemini.name
+                        )
+
+                    except Exception:
+
+                        pass
+
+
+                del st.session_state[
+                    "fichiers_geminis_en_attente"
+                ]
+
+                del st.session_state["modele_echoue"]
+
+                titre_cours_attente = st.session_state.pop(
+                    "titre_cours_en_attente",
+                    None
+                )
+
+                if fiche_reprise:
+
+                    st.session_state["fiche_generee"] = (
+                        fiche_reprise
+                    )
+
+                    st.session_state["nom_fichier_docx"] = (
+                        nettoyer_nom_fichier(
+                            titre_cours_attente
+                        ) + ".docx"
+                    )
+
+                    st.rerun()
 
 
 # ============================================================
