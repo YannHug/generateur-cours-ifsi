@@ -1292,7 +1292,7 @@ def telecharger_et_uploader_pdf(url_pdf, index, session, client):
 # l'appel direct et la fusion depuis des notes de sous-lots)
 # ============================================================
 
-STRUCTURE_ET_REGLES_FICHE = """
+STRUCTURE_ET_REGLES_FICHE = r"""
 ==============================
 NIVEAU ET PUBLIC — TRÈS IMPORTANT
 ==============================
@@ -1399,6 +1399,11 @@ RÈGLES
 - Mets en gras (**...**) les termes et valeurs clés
   (seuils, noms de pathologies, règles d'or) pour que la
   fiche soit rapide à scanner visuellement.
+- N'utilise JAMAIS de notation LaTeX (pas de \text{},
+  \circ, \,, ^{...}, _{...}, $...$, etc.). Écris tout en
+  texte normal lisible : "38,5 °C" (pas "38,5\,^\circ\text{C}"),
+  "CD4+" (pas "CD4^{+}"), "10 puissance 14" ou "10^14" en
+  toutes lettres (pas "10^{14}"), "SpO2" (pas "\text{SpO}_2").
 - La fiche doit rester dense et actionnable, pas exhaustive
   au sens "cours magistral" — un étudiant doit pouvoir la
   relire juste avant un examen ou un stage.
@@ -1513,7 +1518,7 @@ def creer_notes_sous_lot(
     )
 
 
-    prompt = f"""
+    prompt = rf"""
 Tu es un formateur expert en Institut de Formation
 en Soins Infirmiers (IFSI).
 
@@ -1545,6 +1550,9 @@ RÈGLES :
   brièvement survolée à l'oral) mais très concis dans la
   FORMULATION.
 - Si un passage est incompréhensible, indique-le brièvement.
+- N'utilise JAMAIS de notation LaTeX (pas de \text, \circ,
+  exposants/indices entre accolades, symboles $) — écris
+  tout en texte normal ("38,5 °C", "CD4+", "SpO2"...).
 - Ne produis pas encore de tableau ni de section "règles
   d'or" mises en forme — ce sera fait lors de la fusion
   finale avec les autres lots.
@@ -1608,7 +1616,7 @@ NOTES DU LOT {i + 1}
         for i, texte in enumerate(notes_par_lot)
     )
 
-    prompt = f"""
+    prompt = rf"""
 Tu es un formateur expert en Institut de Formation
 en Soins Infirmiers (IFSI).
 
@@ -1752,6 +1760,32 @@ def definir_couleur_fond_cellule(cellule, couleur_hex):
     tcPr.append(ombrage)
 
 
+TABLE_EXPOSANT = str.maketrans("0123456789+-", "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻")
+TABLE_INDICE = str.maketrans("0123456789+-", "₀₁₂₃₄₅₆₇₈₉₊₋")
+
+
+def _convertir_exposant(correspondance):
+
+    contenu = correspondance.group(1)
+
+    if re.fullmatch(r"[\d+\-]+", contenu):
+
+        return contenu.translate(TABLE_EXPOSANT)
+
+    return contenu
+
+
+def _convertir_indice(correspondance):
+
+    contenu = correspondance.group(1)
+
+    if re.fullmatch(r"[\d+\-]+", contenu):
+
+        return contenu.translate(TABLE_INDICE)
+
+    return contenu
+
+
 def nettoyer_latex(texte):
 
     remplacements = {
@@ -1765,16 +1799,39 @@ def nettoyer_latex(texte):
         r"\alpha": "α",
         r"\beta": "β",
         r"\gamma": "γ",
+        r"\circ": "°",
     }
 
     for cle, valeur in remplacements.items():
 
         texte = texte.replace(cle, valeur)
 
+    # \text{XYZ} → XYZ (retire l'enrobage, garde le contenu)
+    texte = re.sub(r"\\text\{([^}]*)\}", r"\1", texte)
+
+    # \, (espace fine LaTeX) → rien
+    texte = texte.replace(r"\,", "")
+
+    # Exposants/indices numériques : X^{14} → X¹⁴, X_2 → X₂
+    # (vrais caractères exposant/indice, pas une simple
+    # concaténation qui rendrait "10^{14}" en "1014").
+    texte = re.sub(r"\^\{([^}]*)\}", _convertir_exposant, texte)
+    texte = re.sub(r"_\{([^}]*)\}", _convertir_indice, texte)
+    texte = re.sub(r"\^(\S)", _convertir_exposant, texte)
+    texte = re.sub(r"_(\S)", _convertir_indice, texte)
+
+    # Toute commande LaTeX restante non reconnue (\quelquechose)
+    # est simplement retirée plutôt que laissée telle quelle.
+    texte = re.sub(r"\\[a-zA-Z]+", "", texte)
+
     # Retire les délimiteurs $...$ ou $$...$$ sans supprimer
     # le contenu (on n'a pas de vrai rendu mathématique, mais
     # on évite au moins les "$" qui polluent le texte).
     texte = re.sub(r"\${1,2}", "", texte)
+
+    # Nettoie les résidus isolés de ^ ou _ qui n'auraient pas
+    # été capturés par les règles ci-dessus.
+    texte = texte.replace("^", "").replace("_", "")
 
     return texte
 
