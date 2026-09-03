@@ -11,7 +11,9 @@ import re
 import subprocess
 import shutil
 from docx import Document
-from docx.shared import Pt
+from docx.shared import Pt, RGBColor
+from docx.oxml.ns import qn
+from docx.oxml import OxmlElement
 
 
 # ============================================================
@@ -1285,6 +1287,132 @@ def telecharger_et_uploader_pdf(url_pdf, index, session, client):
 # (pas de résultat partiel par audio comme avant).
 # ============================================================
 
+# ============================================================
+# STRUCTURE ET RÈGLES DE LA FICHE FINALE (partagée entre
+# l'appel direct et la fusion depuis des notes de sous-lots)
+# ============================================================
+
+STRUCTURE_ET_REGLES_FICHE = """
+==============================
+NIVEAU ET PUBLIC — TRÈS IMPORTANT
+==============================
+
+Cette fiche est destinée à un(e) étudiant(e) INFIRMIER(ÈRE),
+pas à un étudiant en médecine. Ça change la façon de
+présenter le contenu :
+
+- Ne développe PAS en détail les mécanismes moléculaires ou
+  immunologiques fins (cascades biochimiques, sous-types de
+  cellules, voies de signalisation...) sauf s'ils ont une
+  conséquence clinique directe et utile à l'exercice
+  infirmier. Une phrase de mécanisme général suffit la
+  plupart du temps ("lésion de l'endothélium → dépôt de
+  fibrine → greffe bactérienne" plutôt qu'un paragraphe sur
+  la cascade du complément).
+- Privilégie systématiquement ce qui est ACTIONNABLE pour un
+  infirmier : que surveiller, quand alerter, quel geste
+  technique, quelle précaution, quelle règle clinique
+  simple à retenir.
+- Utilise un vocabulaire clair, évite le jargon médical non
+  expliqué.
+
+==============================
+STRUCTURE OBLIGATOIRE
+==============================
+
+# 1. Physiopathologie (l'essentiel)
+
+Pour chaque pathologie ou notion abordée dans le cours,
+donne en quelques lignes maximum :
+
+- le mécanisme en une phrase simple ;
+- les conséquences principales ;
+- les éléments clés (localisation, germes en cause,
+  facteurs favorisants...) si pertinents.
+
+Reste concis — c'est un rappel, pas un cours d'anatomo-
+pathologie. Utilise des sous-titres par pathologie/notion.
+
+
+# 2. Signes cliniques et d'alerte
+
+Présente les pathologies du cours sous forme de TABLEAU
+avec exactement ces colonnes :
+
+| Pathologie | Signes typiques | Signes de gravité / Complications |
+
+Une ligne par pathologie ou situation clinique abordée dans
+le cours. Sois concret et clinique (ce que le patient
+présente), pas théorique.
+
+
+# 3. Rôle propre et surveillance infirmière (IDE)
+
+Organise cette section en sous-parties claires, par exemple :
+
+- Surveillance des paramètres vitaux (lesquels, pourquoi,
+  quel seuil d'alerte) ;
+- Prélèvements et examens (quoi, quand, précautions avant/
+  après le geste) ;
+- Isolement et prévention (type de précautions — gouttelettes,
+  contact, air — et pour quelles pathologies du cours) ;
+- Tout autre élément de rôle propre pertinent évoqué dans
+  le cours (soins, gestes techniques, éducation du patient).
+
+Reste concret et actionnable : ce qu'un(e) infirmier(ère)
+fait réellement, pas de la théorie médicale.
+
+
+# 4. Urgences absolues et règles d'or
+
+Termine par deux sous-parties :
+
+- "Urgences vitales absolues" : les situations décrites
+  dans le cours qui nécessitent une action immédiate
+  (avec le geste ou le traitement d'urgence associé s'il
+  est mentionné) ;
+- "Règles d'or" : des phrases courtes et mémorisables du
+  type "Toute fièvre chez X = Y jusqu'à preuve du
+  contraire", reprenant les raccourcis cliniques donnés
+  par l'enseignant ou déductibles clairement du cours.
+
+N'invente aucune urgence ou règle qui ne serait pas
+mentionnée ou clairement déductible du contenu fourni.
+
+
+==============================
+RÈGLES
+==============================
+
+- Reste fidèle au contenu fourni, n'invente aucune
+  information.
+- Fusionne les informations et supprime les répétitions.
+- Ne perds aucune information importante, y compris les
+  listes ou exemples présents uniquement sur une diapositive.
+- Si deux passages semblent contradictoires,
+  signale-le plutôt que d'inventer une réponse.
+- Si un passage est incompréhensible, indique-le brièvement.
+- Utilise des tableaux Markdown quand ils facilitent la
+  lecture (obligatoire pour la section 2).
+- Utilise des listes à puces courtes plutôt que des
+  paragraphes denses.
+- Mets en gras (**...**) les termes et valeurs clés
+  (seuils, noms de pathologies, règles d'or) pour que la
+  fiche soit rapide à scanner visuellement.
+- La fiche doit rester dense et actionnable, pas exhaustive
+  au sens "cours magistral" — un étudiant doit pouvoir la
+  relire juste avant un examen ou un stage.
+"""
+
+
+# Nombre maximal de fichiers (audio + PDF confondus) envoyés
+# dans un seul appel Gemini. Au-delà, on découpe en sous-lots
+# pour rester sous les plafonds de tokens/minute (surtout
+# sensible sur le niveau gratuit) et limiter l'exposition aux
+# 503 sur les très grosses requêtes.
+TAILLE_MAX_SOUS_LOT = 4
+
+
 def creer_fiche_finale(
     client,
     fichiers_geminis,
@@ -1318,90 +1446,7 @@ diapositive. Croise systématiquement les deux sources et
 n'omets aucune diapositive contenant une liste ou des
 exemples cliniques, même si elle n'a été que brièvement
 survolée pendant le cours.
-
-À partir de l'écoute des audios et de la lecture des PDF,
-crée une fiche de révision complète, claire et pédagogique
-destinée à des étudiants infirmiers.
-
-==============================
-STRUCTURE OBLIGATOIRE
-==============================
-
-# 1. L'essentiel de la physiopathologie
-
-Explique simplement :
-
-- les mécanismes ;
-- les causes ;
-- les conséquences ;
-- les notions essentielles.
-
-Définis les termes médicaux importants.
-
-
-# 2. Les signes cliniques d'alerte
-
-Présente :
-
-- les signes cliniques ;
-- les signes de gravité ;
-- les complications ;
-- les situations nécessitant une alerte.
-
-
-# 3. La surveillance infirmière et le rôle propre
-
-Présente clairement :
-
-- les paramètres à surveiller ;
-- les observations cliniques ;
-- la surveillance de l'évolution ;
-- les risques ;
-- les transmissions ;
-- le rôle propre infirmier.
-
-
-# 4. Les grands principes de traitement
-
-Présente :
-
-- les traitements évoqués dans le cours ;
-- leur objectif ;
-- les principales précautions ;
-- la surveillance infirmière associée.
-
-Ne donne pas de posologie qui n'apparaît pas dans les audios.
-
-
-# 5. Points clés à retenir
-
-Termine par une section :
-
-"À retenir pour l'examen"
-
-avec les éléments indispensables à mémoriser.
-
-
-==============================
-RÈGLES
-==============================
-
-- Reste fidèle au contenu des audios et des PDF fournis,
-  n'invente aucune
-  information.
-- Si plusieurs audios sont fournis, fusionne les
-  informations et supprime les répétitions.
-- Ne perds aucune information importante.
-- Si deux passages semblent contradictoires,
-  signale-le plutôt que d'inventer une réponse.
-- Si un passage est incompréhensible, indique-le brièvement.
-- Utilise des tableaux quand ils facilitent
-  la compréhension.
-- Utilise des listes à puces.
-- Utilise un vocabulaire adapté à des étudiants IFSI.
-- La fiche doit être suffisamment détaillée pour réviser
-  efficacement.
-"""
+""" + STRUCTURE_ET_REGLES_FICHE
 
 
     contenu_requete = [prompt] + list(fichiers_geminis)
@@ -1437,8 +1482,266 @@ RÈGLES
 
 
 # ============================================================
+# FONCTION : NOTES DENSES D'UN SOUS-LOT (audio + PDF)
+# ============================================================
+#
+# Utilisée quand il y a trop de fichiers pour un seul appel.
+# Produit des notes condensées (pas la fiche finale mise en
+# forme) à partir d'un sous-ensemble des fichiers du cours.
+# ============================================================
+
+def creer_notes_sous_lot(
+    client,
+    fichiers_sous_lot,
+    model_name,
+    numero_lot,
+    total_lots
+):
+
+    st.write(
+        f"### 🧠 Analyse du lot {numero_lot}/{total_lots} "
+        f"({len(fichiers_sous_lot)} fichier(s))"
+    )
+
+
+    prompt = f"""
+Tu es un formateur expert en Institut de Formation
+en Soins Infirmiers (IFSI).
+
+Tu vas recevoir un SOUS-ENSEMBLE (lot {numero_lot}/{total_lots})
+des enregistrements audio et/ou PDF de supports d'un même
+cours. D'autres lots de ce même cours seront traités
+séparément puis fusionnés avec celui-ci pour produire la
+fiche de révision finale — ce n'est PAS ton rôle ici de
+produire cette fiche finale.
+
+Écoute les audios ET lis attentivement les PDF fournis dans
+CE LOT UNIQUEMENT.
+
+Pour chaque pathologie ou notion abordée dans ce lot, note
+de façon DENSE et STRUCTURÉE (puces courtes, style
+télégraphique, pas de phrases longues ni de mise en forme
+finale) :
+
+- Mécanisme clé (physiopathologie) en une ligne ;
+- Signes cliniques typiques et signes de gravité ;
+- Surveillance infirmière (IDE) pertinente évoquée ;
+- Urgences ou règles cliniques mentionnées.
+
+RÈGLES :
+
+- Reste fidèle au contenu fourni, n'invente rien.
+- Sois exhaustif sur le CONTENU (n'omets aucune pathologie
+  ni aucune liste présente sur une diapositive, même
+  brièvement survolée à l'oral) mais très concis dans la
+  FORMULATION.
+- Si un passage est incompréhensible, indique-le brièvement.
+- Ne produis pas encore de tableau ni de section "règles
+  d'or" mises en forme — ce sera fait lors de la fusion
+  finale avec les autres lots.
+"""
+
+
+    contenu_requete = [prompt] + list(fichiers_sous_lot)
+
+
+    try:
+
+        reponse = appeler_gemini_avec_reprise(
+            client,
+            model_name,
+            contenu_requete
+        )
+
+    except Exception as e:
+
+        st.error(
+            f"❌ Erreur Gemini sur le lot {numero_lot} : {e}"
+        )
+
+        return None
+
+
+    try:
+
+        return reponse.text
+
+    except Exception:
+
+        return None
+
+
+# ============================================================
+# FONCTION : FICHE FINALE À PARTIR DE NOTES DE SOUS-LOTS
+# ============================================================
+#
+# Appel texte uniquement (pas de fichier audio/PDF ici) : les
+# notes des sous-lots ont déjà "digéré" le contenu brut, donc
+# cet appel reste léger en tokens malgré le nombre de vidéos
+# initial.
+# ============================================================
+
+def creer_fiche_depuis_notes(client, notes_par_lot, model_name):
+
+    st.write(
+        "### 🧠 Fusion des lots et création de la fiche "
+        "de révision finale"
+    )
+
+    contenu_notes = "\n\n".join(
+        f"""
+==============================
+NOTES DU LOT {i + 1}
+==============================
+
+{texte}
+"""
+        for i, texte in enumerate(notes_par_lot)
+    )
+
+    prompt = f"""
+Tu es un formateur expert en Institut de Formation
+en Soins Infirmiers (IFSI).
+
+Tu disposes ci-dessous des notes denses prises séparément
+sur plusieurs lots (parties) d'un même cours. Fusionne-les
+et rédige la fiche de révision finale, en développant et
+reformulant si besoin — les notes sont volontairement
+condensées, à toi de rédiger des explications complètes et
+pédagogiques à partir d'elles, sans jamais inventer
+d'information absente des notes.
+
+==============================
+NOTES DES DIFFÉRENTS LOTS
+==============================
+
+{contenu_notes}
+""" + STRUCTURE_ET_REGLES_FICHE
+
+
+    try:
+
+        reponse = appeler_gemini_avec_reprise(
+            client,
+            model_name,
+            prompt
+        )
+
+    except Exception as e:
+
+        st.error(
+            "❌ Erreur Gemini lors de la fusion finale."
+        )
+
+        st.exception(e)
+
+        return None
+
+
+    try:
+
+        return reponse.text
+
+    except Exception:
+
+        return None
+
+
+# ============================================================
+# FONCTION : ORCHESTRATEUR — appel direct ou découpage
+# en sous-lots selon le nombre de fichiers
+# ============================================================
+
+def generer_fiche_finale(client, fichiers_geminis, model_name):
+
+    if len(fichiers_geminis) <= TAILLE_MAX_SOUS_LOT:
+
+        return creer_fiche_finale(
+            client,
+            fichiers_geminis,
+            model_name
+        )
+
+
+    st.write(
+        f"↪️ {len(fichiers_geminis)} fichiers au total — "
+        f"découpage en sous-lots de {TAILLE_MAX_SOUS_LOT} "
+        f"maximum pour rester sous les plafonds de l'API."
+    )
+
+    sous_lots = [
+        fichiers_geminis[i:i + TAILLE_MAX_SOUS_LOT]
+        for i in range(
+            0, len(fichiers_geminis), TAILLE_MAX_SOUS_LOT
+        )
+    ]
+
+    notes_par_lot = []
+
+    for i, sous_lot in enumerate(sous_lots):
+
+        notes = creer_notes_sous_lot(
+            client,
+            sous_lot,
+            model_name,
+            i + 1,
+            len(sous_lots)
+        )
+
+        if notes:
+
+            notes_par_lot.append(notes)
+
+        else:
+
+            st.warning(
+                f"⚠️ Le lot {i + 1}/{len(sous_lots)} n'a pas "
+                f"pu être analysé — il sera absent de la "
+                f"fiche finale."
+            )
+
+
+    if not notes_par_lot:
+
+        st.error(
+            "❌ Aucun lot n'a pu être analysé."
+        )
+
+        return None
+
+
+    return creer_fiche_depuis_notes(
+        client,
+        notes_par_lot,
+        model_name
+    )
+
+
+# ============================================================
 # FONCTION : WORD (conversion Markdown → docx)
 # ============================================================
+
+# ============================================================
+# THÈME VISUEL DU DOCUMENT
+# ============================================================
+
+COULEUR_TITRE_PRINCIPAL = RGBColor(0x1F, 0x4E, 0x79)   # bleu foncé
+COULEUR_SOUS_TITRE = RGBColor(0x2E, 0x75, 0xB6)         # bleu moyen
+COULEUR_ENTETE_TABLEAU_HEX = "2E75B6"                   # même bleu, en hex
+
+
+def definir_couleur_fond_cellule(cellule, couleur_hex):
+
+    tcPr = cellule._tc.get_or_add_tcPr()
+
+    ombrage = OxmlElement("w:shd")
+
+    ombrage.set(qn("w:val"), "clear")
+    ombrage.set(qn("w:color"), "auto")
+    ombrage.set(qn("w:fill"), couleur_hex)
+
+    tcPr.append(ombrage)
+
 
 def nettoyer_latex(texte):
 
@@ -1560,7 +1863,7 @@ def ajouter_tableau(document, lignes_tableau):
         cols=len(entetes)
     )
 
-    table.style = "Light Grid Accent 1"
+    table.style = "Table Grid"
 
     cellules_entete = table.rows[0].cells
 
@@ -1576,6 +1879,12 @@ def ajouter_tableau(document, lignes_tableau):
         for run in cellules_entete[i].paragraphs[0].runs:
 
             run.bold = True
+            run.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+
+        definir_couleur_fond_cellule(
+            cellules_entete[i],
+            COULEUR_ENTETE_TABLEAU_HEX
+        )
 
 
     for ligne_donnees in lignes_donnees:
@@ -1600,10 +1909,14 @@ def creer_word(texte):
 
     document = Document()
 
-    document.add_heading(
+    titre_document = document.add_heading(
         "Fiche de Révision IFSI",
         0
     )
+
+    for run in titre_document.runs:
+
+        run.font.color.rgb = COULEUR_TITRE_PRINCIPAL
 
     lignes = texte.split("\n")
 
@@ -1747,6 +2060,16 @@ def creer_word(texte):
             )
 
             ajouter_texte_formate(p, titre_texte)
+
+            couleur = (
+                COULEUR_TITRE_PRINCIPAL
+                if niveau == 1
+                else COULEUR_SOUS_TITRE
+            )
+
+            for run in p.runs:
+
+                run.font.color.rgb = couleur
 
             i += 1
 
@@ -2217,7 +2540,7 @@ un lien vers un fichier MP3 accessible.
 
         debut_fiche = time.time()
 
-        fiche = creer_fiche_finale(
+        fiche = generer_fiche_finale(
             client,
             fichiers_geminis,
             modele_choisi
