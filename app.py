@@ -1462,15 +1462,24 @@ RÈGLES
 # sensible sur le niveau gratuit) et limiter l'exposition aux
 # 503 sur les très grosses requêtes.
 #
-# Fixé à 8 (et non plus 4) : un test réel a montré qu'un
-# découpage trop agressif est contre-productif — il multiplie
-# le nombre d'appels Gemini nécessaires (donc le nombre de
-# chances de tomber sur un 503 "high demand"), alors que des
-# lots de 5-6 fichiers restent largement sous les plafonds de
-# tokens/minute (~150K/250K observés en pratique). Le
-# découpage ne doit se déclencher que pour les gros lots
-# (10+ fichiers) où le risque de dépassement est réel.
-TAILLE_MAX_SOUS_LOT = 8
+# Remonté de 8 à 10 : plus le nombre d'appels Gemini
+# séquentiels nécessaires pour une fiche est élevé, plus la
+# probabilité cumulée de tomber sur un 503 "high demand"
+# augmente (chaque appel est une chance en plus d'échouer),
+# même quand aucun plafond de quota n'est réellement dépassé.
+# Nos observations donnent une fourchette approximative de
+# ~18K à ~35K tokens/fichier selon la durée des audios — donc
+# ce seuil reste un compromis empirique, pas une garantie
+# absolue de rester sous les 250K tokens/minute du niveau
+# gratuit. À réajuster si des dépassements de TPM réels
+# (pas juste des 503 ponctuels) apparaissent dans le tableau
+# de bord.
+# TEST TEMPORAIRE : découpage désactivé (seuil très haut) pour
+# vérifier si un seul gros appel se comporte mieux ou moins
+# bien que plusieurs appels séquentiels sur un lot de 15
+# fichiers. À remettre à une valeur raisonnable (ex. 10)
+# après ce test.
+TAILLE_MAX_SOUS_LOT = 999
 
 
 def creer_fiche_finale(
