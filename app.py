@@ -3170,23 +3170,26 @@ un lien vers un fichier MP3 accessible.
 
             if isinstance(e, QuotaEpuiseeError):
 
-                afficher_erreur_quota()
+                st.session_state["type_erreur_gemini"] = "quota"
 
             elif isinstance(e, ModeleIndisponibleError):
 
-                afficher_erreur_modele_indisponible()
+                st.session_state["type_erreur_gemini"] = (
+                    "modele_indisponible"
+                )
 
             else:
 
-                afficher_erreur_surcharge()
+                st.session_state["type_erreur_gemini"] = (
+                    "surcharge"
+                )
 
-            status.update(
-                label="❌ Gemini indisponible",
-                state="error",
-                expanded=True
-            )
-
-            st.stop()
+            # st.rerun() (pas st.stop()) : on a besoin que le
+            # script redémarre pour atteindre la section plus
+            # bas qui affiche le message d'erreur et le bouton
+            # "Réessayer avec..." — st.stop() figerait la page
+            # ici et cette section n'apparaîtrait jamais.
+            st.rerun()
 
         duree_fiche = time.time() - debut_fiche
 
@@ -3214,20 +3217,13 @@ un lien vers un fichier MP3 accessible.
                 titre_cours
             )
 
-            status.update(
-                label="❌ Impossible de créer la fiche",
-                state="error",
-                expanded=True
-            )
+            st.session_state["type_erreur_gemini"] = "generique"
 
-            st.error(
-                "❌ La création de la fiche a échoué pour une "
-                "raison imprévue. Tes transcriptions sont "
-                "conservées — un bouton pour réessayer avec "
-                "un autre modèle devrait apparaître ci-dessous."
-            )
-
-            st.stop()
+            # st.rerun() (pas st.stop()) : on a besoin que le
+            # script redémarre pour atteindre la section plus
+            # bas qui affiche le message d'erreur et le bouton
+            # de reprise.
+            st.rerun()
 
 
         duree_totale = time.time() - debut_total
@@ -3265,6 +3261,28 @@ un lien vers un fichier MP3 accessible.
 # ============================================================
 
 if st.session_state.get("contenus_textuels_en_attente"):
+
+    type_erreur = st.session_state.get("type_erreur_gemini")
+
+    if type_erreur == "quota":
+
+        afficher_erreur_quota()
+
+    elif type_erreur == "modele_indisponible":
+
+        afficher_erreur_modele_indisponible()
+
+    elif type_erreur == "surcharge":
+
+        afficher_erreur_surcharge()
+
+    else:
+
+        st.error(
+            "❌ La création de la fiche a échoué pour une "
+            "raison imprévue. Tes transcriptions sont "
+            "conservées."
+        )
 
     modele_echoue = st.session_state.get("modele_echoue")
     modele_secours = modele_secours_suivant(modele_echoue)
@@ -3330,18 +3348,28 @@ if st.session_state.get("contenus_textuels_en_attente"):
                             modele_secours
                         )
 
-                    except (
-                        QuotaEpuiseeError,
-                        genai_errors.ServerError,
-                        ModeleIndisponibleError
-                    ):
+                    except QuotaEpuiseeError:
 
                         echec_reprise = True
 
-                        st.error(
-                            f"❌ {libelle_secours} est lui "
-                            f"aussi indisponible pour "
-                            f"l'instant."
+                        st.session_state["type_erreur_gemini"] = (
+                            "quota"
+                        )
+
+                    except ModeleIndisponibleError:
+
+                        echec_reprise = True
+
+                        st.session_state["type_erreur_gemini"] = (
+                            "modele_indisponible"
+                        )
+
+                    except genai_errors.ServerError:
+
+                        echec_reprise = True
+
+                        st.session_state["type_erreur_gemini"] = (
+                            "surcharge"
                         )
 
 
@@ -3354,6 +3382,10 @@ if st.session_state.get("contenus_textuels_en_attente"):
                     ]
 
                     del st.session_state["modele_echoue"]
+
+                    st.session_state.pop(
+                        "type_erreur_gemini", None
+                    )
 
                     titre_cours_attente = st.session_state.pop(
                         "titre_cours_en_attente",
@@ -3380,9 +3412,8 @@ if st.session_state.get("contenus_textuels_en_attente"):
                     # tant qu'il reste un modèle dans la chaîne.
                     if not echec_reprise:
 
-                        st.error(
-                            f"❌ Échec imprévu avec "
-                            f"{libelle_secours}."
+                        st.session_state["type_erreur_gemini"] = (
+                            "generique"
                         )
 
                     if modele_secours_suivant(modele_secours):
@@ -3404,6 +3435,10 @@ if st.session_state.get("contenus_textuels_en_attente"):
                         ]
 
                         del st.session_state["modele_echoue"]
+
+                        st.session_state.pop(
+                            "type_erreur_gemini", None
+                        )
 
                         st.session_state.pop(
                             "titre_cours_en_attente", None
