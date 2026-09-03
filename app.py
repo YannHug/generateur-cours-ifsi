@@ -3198,10 +3198,33 @@ un lien vers un fichier MP3 accessible.
 
         if not fiche:
 
+            # Même filet de sécurité que pour les erreurs
+            # anticipées : on garde les transcriptions déjà
+            # obtenues pour permettre un nouvel essai sans
+            # tout retranscrire, même si l'échec vient d'une
+            # cause imprévue (pas juste quota/surcharge/
+            # modèle indisponible).
+            st.session_state["contenus_textuels_en_attente"] = (
+                contenus_textuels
+            )
+
+            st.session_state["modele_echoue"] = modele_choisi
+
+            st.session_state["titre_cours_en_attente"] = (
+                titre_cours
+            )
+
             status.update(
                 label="❌ Impossible de créer la fiche",
                 state="error",
                 expanded=True
+            )
+
+            st.error(
+                "❌ La création de la fiche a échoué pour une "
+                "raison imprévue. Tes transcriptions sont "
+                "conservées — un bouton pour réessayer avec "
+                "un autre modèle devrait apparaître ci-dessous."
             )
 
             st.stop()
@@ -3349,35 +3372,42 @@ if st.session_state.get("contenus_textuels_en_attente"):
 
                     st.rerun()
 
-                elif echec_reprise and modele_secours_suivant(
-                    modele_secours
-                ):
-
-                    # Ce modèle de secours a aussi échoué,
-                    # mais il en reste un dans la chaîne : on
-                    # garde les contenus et on avance d'un cran
-                    # pour proposer le suivant au prochain tour.
-                    st.session_state["modele_echoue"] = (
-                        modele_secours
-                    )
-
-                    st.rerun()
-
                 else:
 
-                    # Fin de la chaîne ou échec non lié au
-                    # quota/à la surcharge : on abandonne.
-                    del st.session_state[
-                        "contenus_textuels_en_attente"
-                    ]
+                    # Échec — connu (quota/surcharge/modèle
+                    # indisponible) ou imprévu, peu importe :
+                    # on ne perd jamais les transcriptions
+                    # tant qu'il reste un modèle dans la chaîne.
+                    if not echec_reprise:
 
-                    del st.session_state["modele_echoue"]
+                        st.error(
+                            f"❌ Échec imprévu avec "
+                            f"{libelle_secours}."
+                        )
 
-                    st.session_state.pop(
-                        "titre_cours_en_attente", None
-                    )
+                    if modele_secours_suivant(modele_secours):
 
-                    if echec_reprise:
+                        # Il reste un modèle dans la chaîne :
+                        # on garde les contenus et on avance
+                        # d'un cran pour proposer le suivant.
+                        st.session_state["modele_echoue"] = (
+                            modele_secours
+                        )
+
+                        st.rerun()
+
+                    else:
+
+                        # Fin de la chaîne : on abandonne.
+                        del st.session_state[
+                            "contenus_textuels_en_attente"
+                        ]
+
+                        del st.session_state["modele_echoue"]
+
+                        st.session_state.pop(
+                            "titre_cours_en_attente", None
+                        )
 
                         st.error(
                             "❌ Tous les modèles de la chaîne "
