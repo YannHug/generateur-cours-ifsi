@@ -63,8 +63,7 @@ st.set_page_config(
 
 def activer_autoscroll():
 
-    st.iframe(
-        """
+    html_autoscroll = """
         <script>
         let suivreLeBas = true;
 
@@ -160,9 +159,26 @@ def activer_autoscroll():
 
         defilerVersLeBas();
         </script>
-        """,
-        height=1
-    )
+        """
+
+    if hasattr(st, "iframe"):
+
+        st.iframe(
+            html_autoscroll,
+            height=1
+        )
+
+    else:
+
+        # Repli pour les versions de Streamlit antérieures à
+        # l'introduction de st.iframe (ex. environnements
+        # locaux avec une version plus ancienne installée).
+        import streamlit.components.v1 as components
+
+        components.html(
+            html_autoscroll,
+            height=1
+        )
 
 
 # ============================================================
@@ -1056,82 +1072,6 @@ def accelerer_audio(fichier_entree, index, facteur=FACTEUR_ACCELERATION):
 
 
 # ============================================================
-# FONCTION : ATTENDRE LE TRAITEMENT GEMINI
-# ============================================================
-
-def attendre_fichier(client, fichier):
-
-    maximum = 300
-
-    temps = 0
-
-    while temps < maximum:
-
-        try:
-
-            info = client.files.get(
-                name=fichier.name
-            )
-
-        except Exception as e:
-
-            st.error(
-                f"❌ Impossible de vérifier le fichier : {e}"
-            )
-
-            return None
-
-
-        if hasattr(info.state, "name"):
-
-            statut = info.state.name
-
-        else:
-
-            statut = str(info.state)
-
-
-        st.write(
-            f"État Gemini : `{statut}`"
-        )
-
-
-        if statut == "ACTIVE":
-
-            # ⚠️ CORRECTIF : on retourne l'objet ORIGINAL renvoyé par
-            # client.files.upload() (celui reçu en paramètre : `fichier`),
-            # et non "info" (celui renvoyé par client.files.get()).
-            # Passer "info" à generate_content() déclenchait un
-            # 400 INVALID_ARGUMENT côté API Gemini.
-            return fichier
-
-
-        if statut in [
-            "FAILED",
-            "ERROR"
-        ]:
-
-            st.error(
-                f"❌ Gemini n'a pas réussi à traiter "
-                f"{fichier.name}"
-            )
-
-            return None
-
-
-        time.sleep(3)
-
-        temps += 3
-
-
-    st.error(
-        "⏱️ Gemini a mis trop de temps à traiter le fichier."
-    )
-
-    return None
-
-
-# ============================================================
 # FONCTION : ANALYSER UN AUDIO
 # ============================================================
 
@@ -1244,78 +1184,111 @@ vers un autre modèle de la chaîne de repli.
     )
 
 
-def uploader_audio_gemini(
-    client,
-    fichier_local,
-    numero
-):
+# ============================================================
+# FONCTION : TRANSCRIRE L'AUDIO EN LOCAL (Whisper, sans API)
+# ============================================================
+#
+# Remplace l'envoi de l'audio brut à Gemini : on transcrit
+# nous-mêmes, sur le serveur qui héberge l'appli, avec un
+# modèle Whisper téléchargé une fois puis réutilisé. Aucune
+# requête réseau vers Gemini pour cette étape — donc aucun
+# risque de 503/quota sur la partie la plus lourde en tokens.
+# Contrepartie assumée : plus lent (minutes, pas secondes),
+# et tourne sur CPU sur l'hébergement gratuit.
+# ============================================================
+
+MODELE_WHISPER_TAILLE = "base"
+
+_modele_whisper_charge = None
+
+
+def obtenir_modele_whisper():
+
+    global _modele_whisper_charge
+
+    if _modele_whisper_charge is None:
+
+        from faster_whisper import WhisperModel
+
+        st.write(
+            f"📥 Chargement du modèle Whisper "
+            f"« {MODELE_WHISPER_TAILLE} » (une seule fois, "
+            f"peut prendre un moment la première fois)..."
+        )
+
+        _modele_whisper_charge = WhisperModel(
+            MODELE_WHISPER_TAILLE,
+            device="cpu",
+            compute_type="int8"
+        )
+
+    return _modele_whisper_charge
+
+
+def transcrire_audio_local(fichier_local, numero):
 
     st.write(
-        f"⬆️ Envoi de l'audio {numero} à Gemini..."
+        f"🎙️ Transcription locale de l'audio {numero} "
+        f"(Whisper, sans appel API — peut prendre plusieurs "
+        f"minutes)..."
     )
-
 
     try:
 
-        fichier = client.files.upload(
-            file=fichier_local
+        modele = obtenir_modele_whisper()
+
+        segments, info = modele.transcribe(
+            fichier_local,
+            language="fr",
+            vad_filter=True
         )
+
+        texte = " ".join(
+            segment.text.strip() for segment in segments
+        ).strip()
 
     except Exception as e:
 
         st.error(
-            f"❌ Erreur d'upload : {e}"
+            f"❌ Erreur de transcription locale : {e}"
         )
 
         return None
 
 
-    st.write(
-        f"📤 Fichier envoyé : `{fichier.name}`"
-    )
+    if not texte:
 
-
-    # Attendre que Gemini ait terminé de traiter le fichier
-    fichier_pret = attendre_fichier(
-        client,
-        fichier
-    )
-
-
-    if fichier_pret is None:
-
-        try:
-
-            client.files.delete(
-                name=fichier.name
-            )
-
-        except Exception:
-
-            pass
+        st.warning(
+            f"⚠️ Transcription vide pour l'audio {numero} — "
+            f"fichier probablement silencieux ou illisible."
+        )
 
         return None
 
 
     st.success(
-        f"✅ Audio {numero} envoyé et prêt."
+        f"✅ Audio {numero} transcrit localement "
+        f"({len(texte.split())} mots)."
     )
 
-
-    return fichier_pret
+    return texte
 
 
 # ============================================================
-# FONCTION : TÉLÉCHARGER ET ENVOYER UN PDF SUPPORT À GEMINI
+# FONCTION : TÉLÉCHARGER ET EXTRAIRE LE TEXTE D'UN PDF SUPPORT
 # ============================================================
 #
 # Les diapositives (PDF "Support" liés sur la page de cours)
 # contiennent parfois des informations que le professeur n'a
-# pas développées à l'oral. On les envoie à Gemini aux côtés
-# des audios pour enrichir la fiche finale.
+# pas développées à l'oral. On extrait le texte nous-mêmes
+# (bibliothèque Python, pas d'IA) plutôt que d'envoyer le PDF
+# à Gemini — aucun appel réseau vers Gemini pour cette étape.
+#
+# Limite assumée : ne « voit » pas les schémas/images des
+# diapositives, seulement le texte qu'elles contiennent.
 # ============================================================
 
-def telecharger_et_uploader_pdf(url_pdf, index, session, client):
+def telecharger_et_extraire_pdf(url_pdf, index, session):
 
     try:
 
@@ -1352,91 +1325,71 @@ def telecharger_et_uploader_pdf(url_pdf, index, session, client):
         return None
 
 
-    nom_fichier = f"support_{index}.pdf"
-
-    try:
-
-        with open(nom_fichier, "wb") as f:
-
-            f.write(reponse.content)
-
-    except Exception as e:
-
-        st.write(
-            f"⚠️ Impossible d'enregistrer le support {index} : {e}"
-        )
-
-        return None
-
-
     st.write(
-        f"⬆️ Envoi du support PDF {index} à Gemini..."
+        f"📄 Extraction du texte du support PDF {index}..."
     )
 
     try:
 
-        fichier = client.files.upload(
-            file=nom_fichier
-        )
+        import pdfplumber
+
+        with pdfplumber.open(
+            io.BytesIO(reponse.content)
+        ) as pdf:
+
+            pages_texte = [
+                page.extract_text() or ""
+                for page in pdf.pages
+            ]
+
+        texte = "\n\n".join(
+            t for t in pages_texte if t.strip()
+        ).strip()
 
     except Exception as e:
 
         st.write(
-            f"⚠️ Erreur d'upload du support {index} : {e}"
+            f"⚠️ Erreur d'extraction du support {index} : {e}"
         )
 
         return None
 
-    finally:
 
-        try:
+    if not texte:
 
-            os.remove(nom_fichier)
-
-        except Exception:
-
-            pass
-
-
-    fichier_pret = attendre_fichier(
-        client,
-        fichier
-    )
-
-    if fichier_pret is None:
-
-        try:
-
-            client.files.delete(name=fichier.name)
-
-        except Exception:
-
-            pass
+        st.warning(
+            f"⚠️ Aucun texte extrait du support {index} "
+            f"(PDF probablement composé uniquement d'images "
+            f"scannées, non détectable par extraction directe)."
+        )
 
         return None
 
 
     st.success(
-        f"✅ Support PDF {index} envoyé et prêt."
+        f"✅ Support PDF {index} extrait "
+        f"({len(texte.split())} mots)."
     )
 
-    return fichier_pret
+    return texte
 
 
 # ============================================================
 # FONCTION : CRÉER LA FICHE FINALE (un seul appel Gemini,
-# avec tous les fichiers audio directement en entrée)
+# texte seul — transcriptions + PDF déjà obtenus en local)
 # ============================================================
 #
-# Fusionne ce qui était avant deux étapes (transcription par
-# audio, puis synthèse à partir du texte) en un seul appel :
-# Gemini écoute directement tous les audios et rédige la
-# fiche finale en une passe. Ça évite de payer deux fois le
-# même contenu (une fois en sortie de transcription, une fois
-# en entrée de la synthèse).
+# L'audio est transcrit localement (Whisper, sans appel API)
+# et les PDF sont extraits localement (pdfplumber) avant même
+# d'arriver ici. Gemini ne reçoit donc que du texte, jamais de
+# fichier audio/PDF brut — ce qui élimine toute exposition aux
+# 503/quota sur la partie la plus lourde du traitement, et
+# réduit fortement le volume de tokens envoyé (le texte est
+# beaucoup plus compact que l'audio brut).
 #
 # Compromis assumé : si cet appel échoue, tout est à refaire
-# (pas de résultat partiel par audio comme avant).
+# pour la fiche (mais pas les transcriptions, conservées pour
+# permettre une reprise avec un autre modèle).
 # ============================================================
 
 # ============================================================
@@ -1608,24 +1561,34 @@ RÈGLES
 """
 
 
-# Nombre maximal de fichiers (audio + PDF confondus) envoyés
-# dans un seul appel Gemini. Au-delà, on découpe en sous-lots
-# pour rester sous les plafonds de tokens/minute (surtout
-# sensible sur le niveau gratuit) et limiter l'exposition aux
-# 503 sur les très grosses requêtes.
+# Nombre maximal d'éléments (transcriptions audio + textes
+# PDF confondus) envoyés dans un seul appel Gemini. Au-delà,
+# on découpe en sous-lots pour limiter l'exposition aux 503
+# sur les grosses requêtes.
 #
 # Remonté de 8 à 10 : plus le nombre d'appels Gemini
 # séquentiels nécessaires pour une fiche est élevé, plus la
 # probabilité cumulée de tomber sur un 503 "high demand"
 # augmente (chaque appel est une chance en plus d'échouer),
 # même quand aucun plafond de quota n'est réellement dépassé.
-# Nos observations donnent une fourchette approximative de
-# ~18K à ~35K tokens/fichier selon la durée des audios — donc
-# ce seuil reste un compromis empirique, pas une garantie
-# absolue de rester sous les 250K tokens/minute du niveau
-# gratuit. À réajuster si des dépassements de TPM réels
-# (pas juste des 503 ponctuels) apparaissent dans le tableau
-# de bord.
+#
+# ⚠️ Recalibrage à prévoir : les chiffres ci-dessous
+# (~18K-35K tokens/élément) dataient de l'ancienne
+# architecture, où l'audio brut était envoyé à Gemini. Depuis
+# le passage à la transcription locale (Whisper) + extraction
+# PDF locale, chaque élément n'est plus que du TEXTE — bien
+# plus compact que l'audio/PDF brut. Le vrai plafond de
+# tokens/minute est donc probablement beaucoup plus loin
+# qu'avant ; ce seuil de 10 reste hérité de l'ancienne
+# architecture et mériterait d'être retesté (voire remonté
+# nettement) une fois des données réelles disponibles sur le
+# nouveau pipeline.
+#
+# Nos observations (ancienne architecture) donnaient une
+# fourchette approximative de ~18K à ~35K tokens/fichier
+# selon la durée des audios — donc ce seuil reste un
+# compromis empirique, pas une garantie absolue de rester
+# sous les 250K tokens/minute du niveau gratuit.
 #
 # Note : un test à 999 (découpage désactivé) a été tenté sur
 # un lot de 15 fichiers pour départager "1 gros appel" vs
@@ -1639,17 +1602,19 @@ TAILLE_MAX_SOUS_LOT = 10
 
 def creer_fiche_finale(
     client,
-    fichiers_geminis,
+    contenus_textuels,
     model_name
 ):
 
     st.write(
-        "### 🧠 Analyse des audios et création de la "
-        "fiche de révision"
+        "### 🧠 Analyse des transcriptions et création de "
+        "la fiche de révision"
     )
 
 
-    prompt = """
+    contenu_source = "\n\n".join(contenus_textuels)
+
+    prompt = f"""
 Tu es un formateur expert en Institut de Formation
 en Soins Infirmiers (IFSI).
 
@@ -1658,27 +1623,30 @@ donné ce cours à des étudiants INFIRMIERS. Ta mission est
 d'adapter ce contenu d'expert en fiche de révision de
 niveau infirmier — pas de le retranscrire tel quel.
 
-Tu vas recevoir un ou plusieurs enregistrements audio
-appartenant au même cours (éventuellement en plusieurs
-parties), et éventuellement les PDF des diapositives
+Tu vas recevoir la TRANSCRIPTION TEXTUELLE d'un ou plusieurs
+enregistrements audio du même cours (obtenue par
+reconnaissance vocale automatique — elle peut donc contenir
+de légères erreurs de transcription, notamment sur des
+termes médicaux techniques ; utilise ton jugement clinique
+pour corriger silencieusement les erreurs évidentes de ce
+type, ex. un terme médical mal orthographié phonétiquement),
+et éventuellement le texte extrait des diapositives PDF
 ("supports") utilisées pendant ce cours.
 
-Écoute les audios ET lis attentivement les PDF fournis —
-ne produis PAS de retranscription intermédiaire, rédige
-directement la fiche de révision finale.
-
 IMPORTANT : certaines informations (listes, exemples,
-pathologies citées) peuvent apparaître UNIQUEMENT sur une
-diapositive du PDF sans avoir été développées à l'oral, ou
-inversement UNIQUEMENT à l'oral sans être écrites sur la
-diapositive. Croise systématiquement les deux sources et
-n'omets aucune diapositive contenant une liste ou des
-exemples cliniques, même si elle n'a été que brièvement
-survolée pendant le cours.
+pathologies citées) peuvent apparaître UNIQUEMENT dans un
+support PDF sans avoir été développées à l'oral, ou
+inversement UNIQUEMENT dans la transcription orale sans
+être écrites sur une diapositive. Croise systématiquement
+les deux sources et n'omets aucune liste ou exemple clinique
+présent dans l'une ou l'autre, même brièvement.
+
+==============================
+CONTENU DU COURS
+==============================
+
+{contenu_source}
 """ + STRUCTURE_ET_REGLES_FICHE
-
-
-    contenu_requete = [prompt] + list(fichiers_geminis)
 
 
     try:
@@ -1686,7 +1654,7 @@ survolée pendant le cours.
         reponse = appeler_gemini_avec_reprise(
             client,
             model_name,
-            contenu_requete
+            prompt
         )
 
     except QuotaEpuiseeError:
@@ -1723,17 +1691,18 @@ survolée pendant le cours.
 
 
 # ============================================================
-# FONCTION : NOTES DENSES D'UN SOUS-LOT (audio + PDF)
+# FONCTION : NOTES DENSES D'UN SOUS-LOT (transcriptions + PDF)
 # ============================================================
 #
-# Utilisée quand il y a trop de fichiers pour un seul appel.
+# Utilisée quand il y a trop de contenu pour un seul appel.
 # Produit des notes condensées (pas la fiche finale mise en
-# forme) à partir d'un sous-ensemble des fichiers du cours.
+# forme) à partir d'un sous-ensemble des transcriptions/PDF
+# du cours.
 # ============================================================
 
 def creer_notes_sous_lot(
     client,
-    fichiers_sous_lot,
+    contenus_sous_lot,
     model_name,
     numero_lot,
     total_lots
@@ -1741,9 +1710,11 @@ def creer_notes_sous_lot(
 
     st.write(
         f"### 🧠 Analyse du lot {numero_lot}/{total_lots} "
-        f"({len(fichiers_sous_lot)} fichier(s))"
+        f"({len(contenus_sous_lot)} élément(s))"
     )
 
+
+    contenu_source = "\n\n".join(contenus_sous_lot)
 
     prompt = rf"""
 Tu es un formateur expert en Institut de Formation
@@ -1758,14 +1729,18 @@ d'utilité clinique pour un(e) infirmier(ère) — mais
 n'omets aucune pathologie, liste ou exemple clinique.
 
 Tu vas recevoir un SOUS-ENSEMBLE (lot {numero_lot}/{total_lots})
-des enregistrements audio et/ou PDF de supports d'un même
-cours. D'autres lots de ce même cours seront traités
-séparément puis fusionnés avec celui-ci pour produire la
-fiche de révision finale — ce n'est PAS ton rôle ici de
-produire cette fiche finale.
+des transcriptions audio et/ou textes de supports PDF d'un
+même cours. Les transcriptions viennent d'une reconnaissance
+vocale automatique — elles peuvent contenir de légères
+erreurs, notamment sur des termes médicaux ; corrige
+silencieusement les erreurs phonétiques évidentes. D'autres
+lots de ce même cours seront traités séparément puis
+fusionnés avec celui-ci pour produire la fiche de révision
+finale — ce n'est PAS ton rôle ici de produire cette fiche
+finale.
 
-Écoute les audios ET lis attentivement les PDF fournis dans
-CE LOT UNIQUEMENT.
+Lis attentivement tout le contenu fourni dans CE LOT
+UNIQUEMENT.
 
 Pour chaque pathologie ou notion abordée dans ce lot, note
 de façon DENSE et STRUCTURÉE (puces courtes, style
@@ -1791,10 +1766,13 @@ RÈGLES :
 - Ne produis pas encore de tableau ni de section "règles
   d'or" mises en forme — ce sera fait lors de la fusion
   finale avec les autres lots.
+
+==============================
+CONTENU DU LOT
+==============================
+
+{contenu_source}
 """
-
-
-    contenu_requete = [prompt] + list(fichiers_sous_lot)
 
 
     try:
@@ -1802,7 +1780,7 @@ RÈGLES :
         reponse = appeler_gemini_avec_reprise(
             client,
             model_name,
-            contenu_requete
+            prompt
         )
 
     except QuotaEpuiseeError:
@@ -1939,27 +1917,27 @@ NOTES DES DIFFÉRENTS LOTS
 # en sous-lots selon le nombre de fichiers
 # ============================================================
 
-def generer_fiche_finale(client, fichiers_geminis, model_name):
+def generer_fiche_finale(client, contenus_textuels, model_name):
 
-    if len(fichiers_geminis) <= TAILLE_MAX_SOUS_LOT:
+    if len(contenus_textuels) <= TAILLE_MAX_SOUS_LOT:
 
         return creer_fiche_finale(
             client,
-            fichiers_geminis,
+            contenus_textuels,
             model_name
         )
 
 
     st.write(
-        f"↪️ {len(fichiers_geminis)} fichiers au total — "
+        f"↪️ {len(contenus_textuels)} éléments au total — "
         f"découpage en sous-lots de {TAILLE_MAX_SOUS_LOT} "
-        f"maximum pour rester sous les plafonds de l'API."
+        f"maximum."
     )
 
     sous_lots = [
-        fichiers_geminis[i:i + TAILLE_MAX_SOUS_LOT]
+        contenus_textuels[i:i + TAILLE_MAX_SOUS_LOT]
         for i in range(
-            0, len(fichiers_geminis), TAILLE_MAX_SOUS_LOT
+            0, len(contenus_textuels), TAILLE_MAX_SOUS_LOT
         )
     ]
 
@@ -2984,9 +2962,9 @@ https://aistudio.google.com/apikey
         st.stop()
 
 
-    # Liste des fichiers audio envoyés à Gemini (prêts,
-    # état ACTIVE), en attendant l'appel final unique
-    fichiers_geminis = []
+    # Liste des contenus textuels (transcriptions audio +
+    # texte extrait des PDF), en attendant l'appel final unique
+    contenus_textuels = []
 
 
     # ========================================================
@@ -3047,7 +3025,8 @@ https://aistudio.google.com/apikey
 
 
             # ----------------------------------------------
-            # Accélération (réduit le coût Gemini)
+            # Accélération (accélère aussi la transcription
+            # locale, puisqu'il y a moins de secondes à traiter)
             # ----------------------------------------------
 
             if ACCELERATION_ACTIVEE:
@@ -3059,22 +3038,21 @@ https://aistudio.google.com/apikey
 
 
             # ----------------------------------------------
-            # Upload vers Gemini (pas d'analyse ici)
+            # Transcription locale (Whisper, pas d'appel API)
             # ----------------------------------------------
 
-            debut_upload = time.time()
+            debut_transcription = time.time()
 
-            fichier_gemini = uploader_audio_gemini(
-                client,
+            texte_audio = transcrire_audio_local(
                 fichier_local,
                 i + 1
             )
 
-            duree_upload = time.time() - debut_upload
+            duree_transcription = time.time() - debut_transcription
 
             st.write(
-                f"⏱️ Upload de l'audio {i + 1} : "
-                f"{duree_upload:.0f}s"
+                f"⏱️ Transcription de l'audio {i + 1} : "
+                f"{duree_transcription:.0f}s"
             )
 
 
@@ -3093,10 +3071,13 @@ https://aistudio.google.com/apikey
                 pass
 
 
-            if fichier_gemini:
+            if texte_audio:
 
-                fichiers_geminis.append(
-                    fichier_gemini
+                contenus_textuels.append(
+                    f"==============================\n"
+                    f"TRANSCRIPTION AUDIO {i + 1}\n"
+                    f"==============================\n\n"
+                    f"{texte_audio}"
                 )
 
 
@@ -3112,17 +3093,19 @@ https://aistudio.google.com/apikey
 
             for j, url_pdf in enumerate(pdfs_detectes):
 
-                fichier_pdf_gemini = telecharger_et_uploader_pdf(
+                texte_pdf = telecharger_et_extraire_pdf(
                     url_pdf,
                     j + 1,
-                    session,
-                    client
+                    session
                 )
 
-                if fichier_pdf_gemini:
+                if texte_pdf:
 
-                    fichiers_geminis.append(
-                        fichier_pdf_gemini
+                    contenus_textuels.append(
+                        f"==============================\n"
+                        f"SUPPORT PDF {j + 1}\n"
+                        f"==============================\n\n"
+                        f"{texte_pdf}"
                     )
 
 
@@ -3130,7 +3113,7 @@ https://aistudio.google.com/apikey
         # VÉRIFICATION
         # ====================================================
 
-        if not fichiers_geminis:
+        if not contenus_textuels:
 
             status.update(
                 label="❌ Aucun cours analysé",
@@ -3140,7 +3123,8 @@ https://aistudio.google.com/apikey
 
             st.error(
                 """
-Aucun fichier audio n'a pu être envoyé à Gemini.
+Aucune transcription ni aucun texte de support n'a pu être
+obtenu.
 
 Vérifie notamment que les URL contiennent bien
 un lien vers un fichier MP3 accessible.
@@ -3151,8 +3135,8 @@ un lien vers un fichier MP3 accessible.
 
 
         # ====================================================
-        # FICHE FINALE (un seul appel Gemini avec tous
-        # les audios directement en entrée)
+        # FICHE FINALE (un seul appel Gemini, texte seul —
+        # transcriptions + texte des PDF déjà obtenus en local)
         # ====================================================
 
         debut_fiche = time.time()
@@ -3161,7 +3145,7 @@ un lien vers un fichier MP3 accessible.
 
             fiche = generer_fiche_finale(
                 client,
-                fichiers_geminis,
+                contenus_textuels,
                 modele_choisi
             )
 
@@ -3171,11 +3155,11 @@ un lien vers un fichier MP3 accessible.
             ModeleIndisponibleError
         ) as e:
 
-            # On garde les fichiers déjà uploadés (pas de
-            # nettoyage ici) pour permettre un nouvel essai
-            # avec un autre modèle sans tout re-télécharger.
-            st.session_state["fichiers_geminis_en_attente"] = (
-                fichiers_geminis
+            # On garde les transcriptions/textes déjà obtenus
+            # (pas besoin de retranscrire) pour permettre un
+            # nouvel essai avec un autre modèle.
+            st.session_state["contenus_textuels_en_attente"] = (
+                contenus_textuels
             )
 
             st.session_state["modele_echoue"] = modele_choisi
@@ -3210,21 +3194,6 @@ un lien vers un fichier MP3 accessible.
             f"⏱️ Analyse + création de la fiche : "
             f"{duree_fiche:.0f}s"
         )
-
-
-        # Nettoyage des fichiers Gemini, qu'il y ait eu
-        # succès ou échec
-        for fichier_gemini in fichiers_geminis:
-
-            try:
-
-                client.files.delete(
-                    name=fichier_gemini.name
-                )
-
-            except Exception:
-
-                pass
 
 
         if not fiche:
@@ -3272,7 +3241,7 @@ un lien vers un fichier MP3 accessible.
 # rester actionnable après un échec quota/surcharge)
 # ============================================================
 
-if st.session_state.get("fichiers_geminis_en_attente"):
+if st.session_state.get("contenus_textuels_en_attente"):
 
     modele_echoue = st.session_state.get("modele_echoue")
     modele_secours = modele_secours_suivant(modele_echoue)
@@ -3314,8 +3283,8 @@ if st.session_state.get("fichiers_geminis_en_attente"):
 
             else:
 
-                fichiers_en_attente = st.session_state[
-                    "fichiers_geminis_en_attente"
+                contenus_en_attente = st.session_state[
+                    "contenus_textuels_en_attente"
                 ]
 
                 client_reprise = genai.Client(
@@ -3334,7 +3303,7 @@ if st.session_state.get("fichiers_geminis_en_attente"):
 
                         fiche_reprise = generer_fiche_finale(
                             client_reprise,
-                            fichiers_en_attente,
+                            contenus_en_attente,
                             modele_secours
                         )
 
@@ -3355,22 +3324,10 @@ if st.session_state.get("fichiers_geminis_en_attente"):
 
                 if fiche_reprise:
 
-                    # Succès : nettoyage des fichiers,
-                    # sauvegarde du résultat, fin de la chaîne.
-                    for fichier_gemini in fichiers_en_attente:
-
-                        try:
-
-                            client_reprise.files.delete(
-                                name=fichier_gemini.name
-                            )
-
-                        except Exception:
-
-                            pass
-
+                    # Succès : sauvegarde du résultat, fin
+                    # de la chaîne.
                     del st.session_state[
-                        "fichiers_geminis_en_attente"
+                        "contenus_textuels_en_attente"
                     ]
 
                     del st.session_state["modele_echoue"]
@@ -3398,7 +3355,7 @@ if st.session_state.get("fichiers_geminis_en_attente"):
 
                     # Ce modèle de secours a aussi échoué,
                     # mais il en reste un dans la chaîne : on
-                    # garde les fichiers et on avance d'un cran
+                    # garde les contenus et on avance d'un cran
                     # pour proposer le suivant au prochain tour.
                     st.session_state["modele_echoue"] = (
                         modele_secours
@@ -3409,22 +3366,9 @@ if st.session_state.get("fichiers_geminis_en_attente"):
                 else:
 
                     # Fin de la chaîne ou échec non lié au
-                    # quota/à la surcharge : on abandonne et on
-                    # nettoie.
-                    for fichier_gemini in fichiers_en_attente:
-
-                        try:
-
-                            client_reprise.files.delete(
-                                name=fichier_gemini.name
-                            )
-
-                        except Exception:
-
-                            pass
-
+                    # quota/à la surcharge : on abandonne.
                     del st.session_state[
-                        "fichiers_geminis_en_attente"
+                        "contenus_textuels_en_attente"
                     ]
 
                     del st.session_state["modele_echoue"]

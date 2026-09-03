@@ -3,3 +3,5 @@ requests
 beautifulsoup4
 google-genai
 python-docx
+faster-whisper
+pdfplumber
