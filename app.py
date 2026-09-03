@@ -10,6 +10,7 @@ import io
 import re
 import subprocess
 import shutil
+import glob
 from docx import Document
 from docx.shared import Pt, RGBColor
 from docx.oxml.ns import qn
@@ -1275,6 +1276,208 @@ def transcrire_audio_local(fichier_local, numero):
 
 
 # ============================================================
+# FONCTION : TRANSCRIRE L'AUDIO VIA GROQ (Whisper hébergé,
+# gratuit, très rapide — ~15s pour 1h d'audio)
+# ============================================================
+#
+# Contrairement à la transcription locale, celle-ci tourne sur
+# les serveurs de Groq, pas sur cet hébergement — donc aucun
+# risque de bridage CPU côté Streamlit Cloud. Reste gratuite
+# (niveau gratuit Groq : 20 req/min, 2000 req/jour, 28800s
+# d'audio/jour). Limite Groq : 25 Mo par fichier envoyé, donc
+# on découpe les gros fichiers avant envoi.
+# ============================================================
+
+LIMITE_TAILLE_GROQ_MO = 24  # marge de sécurité sous les 25 Mo
+
+
+def diviser_audio_en_morceaux(fichier_local, numero, duree_segment=600):
+
+    if shutil.which("ffmpeg") is None:
+
+        return [fichier_local]
+
+    prefixe = f"groq_chunk_{numero}_%03d.mp3"
+
+    commande = [
+        "ffmpeg", "-y",
+        "-i", fichier_local,
+        "-f", "segment",
+        "-segment_time", str(duree_segment),
+        "-c", "copy",
+        prefixe
+    ]
+
+    try:
+
+        subprocess.run(
+            commande,
+            check=True,
+            capture_output=True,
+            timeout=120
+        )
+
+    except Exception as e:
+
+        st.write(
+            f"⚠️ Échec du découpage audio : {e} — envoi du "
+            f"fichier entier tel quel (risque d'échec Groq "
+            f"si > 25 Mo)."
+        )
+
+        return [fichier_local]
+
+    morceaux = sorted(
+        glob.glob(f"groq_chunk_{numero}_*.mp3")
+    )
+
+    return morceaux if morceaux else [fichier_local]
+
+
+def transcrire_audio_groq(fichier_local, numero, cle_api_groq):
+
+    try:
+
+        from groq import Groq
+
+        client_groq = Groq(api_key=cle_api_groq)
+
+    except Exception as e:
+
+        st.write(
+            f"⚠️ Impossible d'initialiser le client Groq : {e}"
+        )
+
+        return None
+
+
+    taille_mo = os.path.getsize(fichier_local) / (1024 * 1024)
+
+    if taille_mo <= LIMITE_TAILLE_GROQ_MO:
+
+        morceaux = [fichier_local]
+
+    else:
+
+        st.write(
+            f"✂️ Audio {numero} trop volumineux pour Groq "
+            f"({taille_mo:.1f} Mo) — découpage en morceaux..."
+        )
+
+        morceaux = diviser_audio_en_morceaux(
+            fichier_local,
+            numero
+        )
+
+
+    st.write(
+        f"🎙️ Transcription de l'audio {numero} via Groq "
+        f"(Whisper hébergé, quelques secondes)..."
+    )
+
+    textes = []
+
+    for idx, morceau in enumerate(morceaux):
+
+        try:
+
+            with open(morceau, "rb") as f:
+
+                transcription = (
+                    client_groq.audio.transcriptions.create(
+                        file=(os.path.basename(morceau), f.read()),
+                        model="whisper-large-v3",
+                        language="fr",
+                        response_format="text"
+                    )
+                )
+
+            textes.append(str(transcription).strip())
+
+        except Exception as e:
+
+            st.write(
+                f"⚠️ Erreur Groq sur le morceau {idx + 1} de "
+                f"l'audio {numero} : {e}"
+            )
+
+            for m in morceaux:
+
+                if m != fichier_local:
+
+                    try:
+
+                        os.remove(m)
+
+                    except Exception:
+
+                        pass
+
+            return None
+
+        finally:
+
+            if morceau != fichier_local:
+
+                try:
+
+                    os.remove(morceau)
+
+                except Exception:
+
+                    pass
+
+
+    texte_final = " ".join(
+        t for t in textes if t
+    ).strip()
+
+    if not texte_final:
+
+        st.warning(
+            f"⚠️ Transcription Groq vide pour l'audio {numero}."
+        )
+
+        return None
+
+
+    st.success(
+        f"✅ Audio {numero} transcrit via Groq "
+        f"({len(texte_final.split())} mots)."
+    )
+
+    return texte_final
+
+
+def transcrire_audio(fichier_local, numero, cle_api_groq):
+
+    # Groq en priorité (rapide, gratuit, hors de notre
+    # hébergement) — repli automatique sur Whisper local si
+    # pas de clé fournie ou si Groq échoue pour une raison
+    # quelconque (quota, panne, fichier trop long malgré le
+    # découpage...).
+
+    if cle_api_groq:
+
+        texte = transcrire_audio_groq(
+            fichier_local,
+            numero,
+            cle_api_groq
+        )
+
+        if texte:
+
+            return texte
+
+        st.write(
+            f"↪️ Groq indisponible pour l'audio {numero} — "
+            f"repli sur la transcription locale (plus lente)."
+        )
+
+    return transcrire_audio_local(fichier_local, numero)
+
+
+# ============================================================
 # FONCTION : TÉLÉCHARGER ET EXTRAIRE LE TEXTE D'UN PDF SUPPORT
 # ============================================================
 #
@@ -1372,6 +1575,229 @@ def telecharger_et_extraire_pdf(url_pdf, index, session):
     )
 
     return texte
+
+
+# ============================================================
+# FONCTIONS DU MODE "RAPIDE" : envoi direct à Gemini (audio
+# et PDF bruts), sans transcription/extraction locale. Plus
+# rapide, mais consomme davantage de quota Gemini par cours.
+# ============================================================
+
+def attendre_fichier_gemini(client, fichier):
+
+    maximum = 300
+
+    temps = 0
+
+    while temps < maximum:
+
+        try:
+
+            info = client.files.get(
+                name=fichier.name
+            )
+
+        except Exception as e:
+
+            st.error(
+                f"❌ Impossible de vérifier le fichier : {e}"
+            )
+
+            return None
+
+
+        if hasattr(info.state, "name"):
+
+            statut = info.state.name
+
+        else:
+
+            statut = str(info.state)
+
+
+        if statut == "ACTIVE":
+
+            # On retourne l'objet ORIGINAL renvoyé par
+            # client.files.upload() (celui reçu en paramètre),
+            # pas "info" (celui de client.files.get()) — le
+            # passer à generate_content() déclenche un 400.
+            return fichier
+
+
+        if statut in ["FAILED", "ERROR"]:
+
+            st.error(
+                f"❌ Gemini n'a pas réussi à traiter "
+                f"{fichier.name}"
+            )
+
+            return None
+
+
+        time.sleep(3)
+
+        temps += 3
+
+
+    st.error(
+        "⏱️ Gemini a mis trop de temps à traiter le fichier."
+    )
+
+    return None
+
+
+def uploader_audio_gemini(client, fichier_local, numero):
+
+    st.write(
+        f"⬆️ Envoi de l'audio {numero} à Gemini..."
+    )
+
+    try:
+
+        fichier = client.files.upload(
+            file=fichier_local
+        )
+
+    except Exception as e:
+
+        st.error(
+            f"❌ Erreur d'upload : {e}"
+        )
+
+        return None
+
+
+    fichier_pret = attendre_fichier_gemini(
+        client,
+        fichier
+    )
+
+    if fichier_pret is None:
+
+        try:
+
+            client.files.delete(name=fichier.name)
+
+        except Exception:
+
+            pass
+
+        return None
+
+
+    st.success(
+        f"✅ Audio {numero} envoyé et prêt."
+    )
+
+    return fichier_pret
+
+
+def telecharger_et_uploader_pdf(url_pdf, index, session, client):
+
+    try:
+
+        reponse = session.get(
+            url_pdf,
+            timeout=60
+        )
+
+        reponse.raise_for_status()
+
+    except Exception as e:
+
+        st.write(
+            f"⚠️ Support PDF {index} inaccessible : {e}"
+        )
+
+        return None
+
+
+    content_type = reponse.headers.get(
+        "Content-Type", ""
+    ).lower()
+
+    if (
+        "pdf" not in content_type
+        and not reponse.content[:4] == b"%PDF"
+    ):
+
+        st.write(
+            f"⚠️ Support {index} ne semble pas être un PDF "
+            f"valide — ignoré."
+        )
+
+        return None
+
+
+    nom_fichier = f"support_{index}.pdf"
+
+    try:
+
+        with open(nom_fichier, "wb") as f:
+
+            f.write(reponse.content)
+
+    except Exception as e:
+
+        st.write(
+            f"⚠️ Impossible d'enregistrer le support {index} : {e}"
+        )
+
+        return None
+
+
+    st.write(
+        f"⬆️ Envoi du support PDF {index} à Gemini..."
+    )
+
+    try:
+
+        fichier = client.files.upload(
+            file=nom_fichier
+        )
+
+    except Exception as e:
+
+        st.write(
+            f"⚠️ Erreur d'upload du support {index} : {e}"
+        )
+
+        return None
+
+    finally:
+
+        try:
+
+            os.remove(nom_fichier)
+
+        except Exception:
+
+            pass
+
+
+    fichier_pret = attendre_fichier_gemini(
+        client,
+        fichier
+    )
+
+    if fichier_pret is None:
+
+        try:
+
+            client.files.delete(name=fichier.name)
+
+        except Exception:
+
+            pass
+
+        return None
+
+
+    st.success(
+        f"✅ Support PDF {index} envoyé et prêt."
+    )
+
+    return fichier_pret
 
 
 # ============================================================
@@ -1600,7 +2026,7 @@ RÈGLES
 TAILLE_MAX_SOUS_LOT = 10
 
 
-def creer_fiche_finale(
+def creer_fiche_finale_texte(
     client,
     contenus_textuels,
     model_name
@@ -1691,6 +2117,97 @@ CONTENU DU COURS
 
 
 # ============================================================
+# FONCTION : CRÉER LA FICHE FINALE — MODE RAPIDE (un seul
+# appel Gemini, avec tous les fichiers audio/PDF directement
+# en entrée, sans transcription/extraction locale)
+# ============================================================
+
+def creer_fiche_finale_fichiers(
+    client,
+    fichiers_geminis,
+    model_name
+):
+
+    st.write(
+        "### 🧠 Analyse des audios et création de la "
+        "fiche de révision"
+    )
+
+
+    prompt = """
+Tu es un formateur expert en Institut de Formation
+en Soins Infirmiers (IFSI).
+
+Un enseignant (souvent médecin ou expert du domaine) a
+donné ce cours à des étudiants INFIRMIERS. Ta mission est
+d'adapter ce contenu d'expert en fiche de révision de
+niveau infirmier — pas de le retranscrire tel quel.
+
+Tu vas recevoir un ou plusieurs enregistrements audio
+appartenant au même cours (éventuellement en plusieurs
+parties), et éventuellement les PDF des diapositives
+("supports") utilisées pendant ce cours.
+
+Écoute les audios ET lis attentivement les PDF fournis —
+ne produis PAS de retranscription intermédiaire, rédige
+directement la fiche de révision finale.
+
+IMPORTANT : certaines informations (listes, exemples,
+pathologies citées) peuvent apparaître UNIQUEMENT sur une
+diapositive du PDF sans avoir été développées à l'oral, ou
+inversement UNIQUEMENT à l'oral sans être écrites sur la
+diapositive. Croise systématiquement les deux sources et
+n'omets aucune diapositive contenant une liste ou des
+exemples cliniques, même si elle n'a été que brièvement
+survolée pendant le cours.
+""" + STRUCTURE_ET_REGLES_FICHE
+
+
+    contenu_requete = [prompt] + list(fichiers_geminis)
+
+
+    try:
+
+        reponse = appeler_gemini_avec_reprise(
+            client,
+            model_name,
+            contenu_requete
+        )
+
+    except QuotaEpuiseeError:
+
+        raise
+
+    except ModeleIndisponibleError:
+
+        raise
+
+    except genai_errors.ServerError:
+
+        raise
+
+    except Exception as e:
+
+        st.error(
+            "❌ Erreur Gemini lors de la création "
+            "de la fiche finale."
+        )
+
+        st.exception(e)
+
+        return None
+
+
+    try:
+
+        return reponse.text
+
+    except Exception:
+
+        return None
+
+
+# ============================================================
 # FONCTION : NOTES DENSES D'UN SOUS-LOT (transcriptions + PDF)
 # ============================================================
 #
@@ -1700,7 +2217,7 @@ CONTENU DU COURS
 # du cours.
 # ============================================================
 
-def creer_notes_sous_lot(
+def creer_notes_sous_lot_texte(
     client,
     contenus_sous_lot,
     model_name,
@@ -1781,6 +2298,115 @@ CONTENU DU LOT
             client,
             model_name,
             prompt
+        )
+
+    except QuotaEpuiseeError:
+
+        raise
+
+    except ModeleIndisponibleError:
+
+        raise
+
+    except genai_errors.ServerError:
+
+        raise
+
+    except Exception as e:
+
+        st.error(
+            f"❌ Erreur Gemini sur le lot {numero_lot} : {e}"
+        )
+
+        return None
+
+
+    try:
+
+        return reponse.text
+
+    except Exception:
+
+        return None
+
+
+# ============================================================
+# FONCTION : NOTES DENSES D'UN SOUS-LOT — MODE RAPIDE
+# (audio + PDF envoyés directement à Gemini)
+# ============================================================
+
+def creer_notes_sous_lot_fichiers(
+    client,
+    fichiers_sous_lot,
+    model_name,
+    numero_lot,
+    total_lots
+):
+
+    st.write(
+        f"### 🧠 Analyse du lot {numero_lot}/{total_lots} "
+        f"({len(fichiers_sous_lot)} fichier(s))"
+    )
+
+
+    prompt = rf"""
+Tu es un formateur expert en Institut de Formation
+en Soins Infirmiers (IFSI).
+
+Un enseignant (souvent médecin ou expert du domaine) donne
+ce cours à des étudiants INFIRMIERS, pas à des étudiants en
+médecine. Garde ça à l'esprit même à ce stade de prise de
+notes : ne recopie pas mécaniquement chaque détail
+moléculaire ou médical fin de l'enseignant si ça n'a pas
+d'utilité clinique pour un(e) infirmier(ère) — mais
+n'omets aucune pathologie, liste ou exemple clinique.
+
+Tu vas recevoir un SOUS-ENSEMBLE (lot {numero_lot}/{total_lots})
+des enregistrements audio et/ou PDF de supports d'un même
+cours. D'autres lots de ce même cours seront traités
+séparément puis fusionnés avec celui-ci pour produire la
+fiche de révision finale — ce n'est PAS ton rôle ici de
+produire cette fiche finale.
+
+Écoute les audios ET lis attentivement les PDF fournis dans
+CE LOT UNIQUEMENT.
+
+Pour chaque pathologie ou notion abordée dans ce lot, note
+de façon DENSE et STRUCTURÉE (puces courtes, style
+télégraphique, pas de phrases longues ni de mise en forme
+finale) :
+
+- Mécanisme clé (physiopathologie) en une ligne ;
+- Signes cliniques typiques et signes de gravité ;
+- Surveillance infirmière (IDE) pertinente évoquée ;
+- Urgences ou règles cliniques mentionnées.
+
+RÈGLES :
+
+- Reste fidèle au contenu fourni, n'invente rien.
+- Sois exhaustif sur le CONTENU (n'omets aucune pathologie
+  ni aucune liste présente sur une diapositive, même
+  brièvement survolée à l'oral) mais très concis dans la
+  FORMULATION.
+- Si un passage est incompréhensible, indique-le brièvement.
+- N'utilise JAMAIS de notation LaTeX (pas de \text, \circ,
+  exposants/indices entre accolades, symboles $) — écris
+  tout en texte normal ("38,5 °C", "CD4+", "SpO2"...).
+- Ne produis pas encore de tableau ni de section "règles
+  d'or" mises en forme — ce sera fait lors de la fusion
+  finale avec les autres lots.
+"""
+
+
+    contenu_requete = [prompt] + list(fichiers_sous_lot)
+
+
+    try:
+
+        reponse = appeler_gemini_avec_reprise(
+            client,
+            model_name,
+            contenu_requete
         )
 
     except QuotaEpuiseeError:
@@ -1917,27 +2543,38 @@ NOTES DES DIFFÉRENTS LOTS
 # en sous-lots selon le nombre de fichiers
 # ============================================================
 
-def generer_fiche_finale(client, contenus_textuels, model_name):
+def generer_fiche_finale(client, contenus, model_name, mode):
 
-    if len(contenus_textuels) <= TAILLE_MAX_SOUS_LOT:
+    if mode == "rapide":
 
-        return creer_fiche_finale(
+        creer_fiche_fn = creer_fiche_finale_fichiers
+        creer_notes_fn = creer_notes_sous_lot_fichiers
+
+    else:
+
+        creer_fiche_fn = creer_fiche_finale_texte
+        creer_notes_fn = creer_notes_sous_lot_texte
+
+
+    if len(contenus) <= TAILLE_MAX_SOUS_LOT:
+
+        return creer_fiche_fn(
             client,
-            contenus_textuels,
+            contenus,
             model_name
         )
 
 
     st.write(
-        f"↪️ {len(contenus_textuels)} éléments au total — "
+        f"↪️ {len(contenus)} éléments au total — "
         f"découpage en sous-lots de {TAILLE_MAX_SOUS_LOT} "
         f"maximum."
     )
 
     sous_lots = [
-        contenus_textuels[i:i + TAILLE_MAX_SOUS_LOT]
+        contenus[i:i + TAILLE_MAX_SOUS_LOT]
         for i in range(
-            0, len(contenus_textuels), TAILLE_MAX_SOUS_LOT
+            0, len(contenus), TAILLE_MAX_SOUS_LOT
         )
     ]
 
@@ -1945,7 +2582,7 @@ def generer_fiche_finale(client, contenus_textuels, model_name):
 
     for i, sous_lot in enumerate(sous_lots):
 
-        notes = creer_notes_sous_lot(
+        notes = creer_notes_fn(
             client,
             sous_lot,
             model_name,
@@ -1975,6 +2612,10 @@ def generer_fiche_finale(client, contenus_textuels, model_name):
         return None
 
 
+    # La fusion depuis les notes est toujours en texte seul,
+    # quel que soit le mode d'origine (audio/PDF ou
+    # transcription) — les notes de sous-lots sont déjà du
+    # texte dans les deux cas.
     return creer_fiche_depuis_notes(
         client,
         notes_par_lot,
@@ -2732,22 +3373,32 @@ urls_input = st.text_area(
 
 
 cle_api_utilisateur = st.text_input(
-    "🔑 Ta clé API Gemini (gratuite)",
+    "🔑 Ta clé API Gemini (gratuite, obligatoire)",
     type="password",
     placeholder="ex : AIzaSyD-9xY2kLmN3pQ4rS5tU6vW7xY8zA9bC0"
 )
 
-with st.expander("ℹ️ Comment obtenir ma clé API ?"):
+cle_api_groq = st.text_input(
+    "🔑 Ta clé API Groq (gratuite, optionnelle — rend la "
+    "transcription beaucoup plus rapide)",
+    type="password",
+    placeholder="ex : gsk_..."
+)
+
+with st.expander("ℹ️ Comment obtenir mes clés API ?"):
 
     st.write(
-        "Obtiens une clé gratuite sur "
-        "https://aistudio.google.com/apikey (aucune carte "
-        "bancaire requise). Elle n'est jamais enregistrée "
-        "par cette appli : utilisée uniquement le temps de "
-        "cette session, dans ton navigateur.\n\n"
-        "💡 Tu peux la retrouver à tout moment sur la page "
-        "\"Clés API\" d'AI Studio (icône de copie à côté de "
-        "chaque clé) — pas besoin de la noter ailleurs."
+        "**Clé Gemini (obligatoire)** — obtiens-la "
+        "gratuitement sur https://aistudio.google.com/apikey "
+        "(aucune carte bancaire requise). Elle n'est jamais "
+        "enregistrée par cette appli.\n\n"
+        "**Clé Groq (optionnelle)** — obtiens-la gratuitement "
+        "sur https://console.groq.com/keys (aucune carte "
+        "bancaire requise). Elle sert uniquement à accélérer "
+        "la transcription audio (quelques secondes au lieu "
+        "de plusieurs minutes). **Si tu laisses ce champ "
+        "vide, l'appli fonctionne quand même** — juste plus "
+        "lentement."
     )
 
 
@@ -2801,34 +3452,53 @@ def modele_secours_suivant(modele_actuel):
     return None
 
 
-modele_choisi = st.selectbox(
-    "🤖 Modèle Gemini",
-    options=list(MODELES_DISPONIBLES.keys()),
-    format_func=lambda cle: MODELES_DISPONIBLES[cle],
-    index=0
-)
+MODES_TRAITEMENT = {
+    "rapide": "⚡ Rapide (audio envoyé à Gemini)",
+    "gratuit": "🆓 Gratuit (Groq + repli local si besoin)",
+}
 
-with st.expander("ℹ️ Quelle différence entre les modèles ?"):
+# Réglages avancés — repliés par défaut : la plupart des
+# étudiants n'ont pas besoin d'y toucher, les valeurs par
+# défaut (Gemini 3.8 Flash, mode gratuit) conviennent pour
+# l'immense majorité des cas.
+with st.expander("⚙️ Réglages avancés (facultatif)"):
 
-    st.write(
-        "D'après nos tests sur des cours à plusieurs "
-        "sujets :\n\n"
-        "• **Gemini 3.8 Flash** est le plus récent modèle "
-        "Flash de Google — potentiellement la meilleure "
-        "qualité disponible actuellement, à confirmer à "
-        "l'usage.\n\n"
-        "• **Gemini 3.7 Flash** est celui qu'on a le plus "
-        "testé : couvre systématiquement l'intégralité du "
-        "contenu (aucun sujet oublié).\n\n"
-        "• **Gemini 3.6 Flash** est la génération précédant "
-        "3.7/3.8 — un bon choix de repli si les tout derniers "
-        "modèles sont saturés.\n\n"
-        "• **Gemini 3.5 Flash-Lite** est le plus léger, mais "
-        "a parfois oublié une partie des sujets sur des "
-        "cours couvrant plusieurs thèmes distincts lors de "
-        "nos tests. À réserver aux cours courts / à un seul "
-        "sujet, ou en dernier recours si tous les autres "
-        "modèles sont indisponibles."
+    modele_choisi = st.selectbox(
+        "🤖 Modèle Gemini",
+        options=list(MODELES_DISPONIBLES.keys()),
+        format_func=lambda cle: MODELES_DISPONIBLES[cle],
+        index=0
+    )
+
+    st.caption(
+        "D'après nos tests sur des cours à plusieurs sujets : "
+        "**Gemini 3.8 Flash** est le plus récent (recommandé) "
+        ", **3.7 Flash** est celui qu'on a le plus testé "
+        "(très fiable), **3.6 Flash** est un bon repli si les "
+        "derniers modèles sont saturés, et **3.5 Flash-Lite** "
+        "est le plus léger mais a parfois oublié des sujets "
+        "sur des cours couvrant plusieurs thèmes — à réserver "
+        "aux cours courts ou en dernier recours."
+    )
+
+    mode_traitement = st.radio(
+        "Mode de traitement de l'audio",
+        options=list(MODES_TRAITEMENT.keys()),
+        format_func=lambda cle: MODES_TRAITEMENT[cle],
+        index=1,
+        horizontal=True
+    )
+
+    st.caption(
+        "**⚡ Rapide** : l'audio est envoyé directement à "
+        "Gemini — quelques minutes de traitement, mais "
+        "consomme davantage de quota Gemini (plus susceptible "
+        "de tomber sur un quota épuisé ou une surcharge). "
+        "**🆓 Gratuit** (par défaut) : l'audio est transcrit "
+        "via Groq si une clé est fournie (rapide), sinon en "
+        "local sur ce serveur (plus lent) — Gemini ne reçoit "
+        "ensuite que du texte, donc bien moins de risque de "
+        "saturation."
     )
 
 
@@ -2962,9 +3632,11 @@ https://aistudio.google.com/apikey
         st.stop()
 
 
-    # Liste des contenus textuels (transcriptions audio +
-    # texte extrait des PDF), en attendant l'appel final unique
-    contenus_textuels = []
+    # Liste des contenus à analyser : soit des blocs de texte
+    # (mode gratuit — transcriptions + PDF extraits en local),
+    # soit des fichiers Gemini (mode rapide — audio/PDF envoyés
+    # directement), selon le mode choisi par l'utilisateur.
+    contenus_a_traiter = []
 
 
     # ========================================================
@@ -3037,48 +3709,80 @@ https://aistudio.google.com/apikey
                 )
 
 
-            # ----------------------------------------------
-            # Transcription locale (Whisper, pas d'appel API)
-            # ----------------------------------------------
+            if mode_traitement == "gratuit":
 
-            debut_transcription = time.time()
+                # ------------------------------------------
+                # Transcription : Groq en priorité (rapide,
+                # gratuit, hors de notre hébergement), repli
+                # automatique sur Whisper local si besoin.
+                # ------------------------------------------
 
-            texte_audio = transcrire_audio_local(
-                fichier_local,
-                i + 1
-            )
+                debut_transcription = time.time()
 
-            duree_transcription = time.time() - debut_transcription
-
-            st.write(
-                f"⏱️ Transcription de l'audio {i + 1} : "
-                f"{duree_transcription:.0f}s"
-            )
-
-
-            # ----------------------------------------------
-            # Suppression locale
-            # ----------------------------------------------
-
-            try:
-
-                os.remove(
-                    fichier_local
+                texte_audio = transcrire_audio(
+                    fichier_local,
+                    i + 1,
+                    cle_api_groq
                 )
 
-            except Exception:
-
-                pass
-
-
-            if texte_audio:
-
-                contenus_textuels.append(
-                    f"==============================\n"
-                    f"TRANSCRIPTION AUDIO {i + 1}\n"
-                    f"==============================\n\n"
-                    f"{texte_audio}"
+                duree_transcription = (
+                    time.time() - debut_transcription
                 )
+
+                st.write(
+                    f"⏱️ Transcription de l'audio {i + 1} : "
+                    f"{duree_transcription:.0f}s"
+                )
+
+                try:
+
+                    os.remove(fichier_local)
+
+                except Exception:
+
+                    pass
+
+                if texte_audio:
+
+                    contenus_a_traiter.append(
+                        f"==============================\n"
+                        f"TRANSCRIPTION AUDIO {i + 1}\n"
+                        f"==============================\n\n"
+                        f"{texte_audio}"
+                    )
+
+            else:
+
+                # ------------------------------------------
+                # Mode rapide : envoi direct à Gemini
+                # ------------------------------------------
+
+                debut_upload = time.time()
+
+                fichier_gemini = uploader_audio_gemini(
+                    client,
+                    fichier_local,
+                    i + 1
+                )
+
+                duree_upload = time.time() - debut_upload
+
+                st.write(
+                    f"⏱️ Upload de l'audio {i + 1} : "
+                    f"{duree_upload:.0f}s"
+                )
+
+                try:
+
+                    os.remove(fichier_local)
+
+                except Exception:
+
+                    pass
+
+                if fichier_gemini:
+
+                    contenus_a_traiter.append(fichier_gemini)
 
 
         # ----------------------------------------------------
@@ -3093,27 +3797,46 @@ https://aistudio.google.com/apikey
 
             for j, url_pdf in enumerate(pdfs_detectes):
 
-                texte_pdf = telecharger_et_extraire_pdf(
-                    url_pdf,
-                    j + 1,
-                    session
-                )
+                if mode_traitement == "gratuit":
 
-                if texte_pdf:
-
-                    contenus_textuels.append(
-                        f"==============================\n"
-                        f"SUPPORT PDF {j + 1}\n"
-                        f"==============================\n\n"
-                        f"{texte_pdf}"
+                    texte_pdf = telecharger_et_extraire_pdf(
+                        url_pdf,
+                        j + 1,
+                        session
                     )
+
+                    if texte_pdf:
+
+                        contenus_a_traiter.append(
+                            f"==========================\n"
+                            f"SUPPORT PDF {j + 1}\n"
+                            f"==========================\n\n"
+                            f"{texte_pdf}"
+                        )
+
+                else:
+
+                    fichier_pdf_gemini = (
+                        telecharger_et_uploader_pdf(
+                            url_pdf,
+                            j + 1,
+                            session,
+                            client
+                        )
+                    )
+
+                    if fichier_pdf_gemini:
+
+                        contenus_a_traiter.append(
+                            fichier_pdf_gemini
+                        )
 
 
         # ====================================================
         # VÉRIFICATION
         # ====================================================
 
-        if not contenus_textuels:
+        if not contenus_a_traiter:
 
             status.update(
                 label="❌ Aucun cours analysé",
@@ -3135,8 +3858,7 @@ un lien vers un fichier MP3 accessible.
 
 
         # ====================================================
-        # FICHE FINALE (un seul appel Gemini, texte seul —
-        # transcriptions + texte des PDF déjà obtenus en local)
+        # FICHE FINALE (un seul appel Gemini)
         # ====================================================
 
         debut_fiche = time.time()
@@ -3145,8 +3867,9 @@ un lien vers un fichier MP3 accessible.
 
             fiche = generer_fiche_finale(
                 client,
-                contenus_textuels,
-                modele_choisi
+                contenus_a_traiter,
+                modele_choisi,
+                mode_traitement
             )
 
         except (
@@ -3155,12 +3878,15 @@ un lien vers un fichier MP3 accessible.
             ModeleIndisponibleError
         ) as e:
 
-            # On garde les transcriptions/textes déjà obtenus
-            # (pas besoin de retranscrire) pour permettre un
-            # nouvel essai avec un autre modèle.
+            # On garde les contenus déjà obtenus (transcriptions
+            # ou fichiers Gemini déjà uploadés) pour permettre
+            # un nouvel essai avec un autre modèle sans tout
+            # refaire.
             st.session_state["contenus_textuels_en_attente"] = (
-                contenus_textuels
+                contenus_a_traiter
             )
+
+            st.session_state["mode_en_attente"] = mode_traitement
 
             st.session_state["modele_echoue"] = modele_choisi
 
@@ -3202,14 +3928,15 @@ un lien vers un fichier MP3 accessible.
         if not fiche:
 
             # Même filet de sécurité que pour les erreurs
-            # anticipées : on garde les transcriptions déjà
-            # obtenues pour permettre un nouvel essai sans
-            # tout retranscrire, même si l'échec vient d'une
-            # cause imprévue (pas juste quota/surcharge/
-            # modèle indisponible).
+            # anticipées : on garde les contenus déjà obtenus
+            # pour permettre un nouvel essai sans tout refaire,
+            # même si l'échec vient d'une cause imprévue (pas
+            # juste quota/surcharge/modèle indisponible).
             st.session_state["contenus_textuels_en_attente"] = (
-                contenus_textuels
+                contenus_a_traiter
             )
+
+            st.session_state["mode_en_attente"] = mode_traitement
 
             st.session_state["modele_echoue"] = modele_choisi
 
@@ -3224,6 +3951,22 @@ un lien vers un fichier MP3 accessible.
             # bas qui affiche le message d'erreur et le bouton
             # de reprise.
             st.rerun()
+
+
+        # Nettoyage des fichiers Gemini (mode rapide
+        # uniquement — en mode gratuit, ce ne sont que des
+        # chaînes de texte, rien à supprimer côté Gemini).
+        if mode_traitement == "rapide":
+
+            for element in contenus_a_traiter:
+
+                try:
+
+                    client.files.delete(name=element.name)
+
+                except Exception:
+
+                    pass
 
 
         duree_totale = time.time() - debut_total
@@ -3328,6 +4071,10 @@ if st.session_state.get("contenus_textuels_en_attente"):
                     "contenus_textuels_en_attente"
                 ]
 
+                mode_en_attente = st.session_state.get(
+                    "mode_en_attente", "gratuit"
+                )
+
                 client_reprise = genai.Client(
                     api_key=cle_api_reprise
                 )
@@ -3345,7 +4092,8 @@ if st.session_state.get("contenus_textuels_en_attente"):
                         fiche_reprise = generer_fiche_finale(
                             client_reprise,
                             contenus_en_attente,
-                            modele_secours
+                            modele_secours,
+                            mode_en_attente
                         )
 
                     except QuotaEpuiseeError:
@@ -3375,8 +4123,23 @@ if st.session_state.get("contenus_textuels_en_attente"):
 
                 if fiche_reprise:
 
-                    # Succès : sauvegarde du résultat, fin
-                    # de la chaîne.
+                    # Succès : nettoyage des fichiers Gemini
+                    # si mode rapide, sauvegarde du résultat,
+                    # fin de la chaîne.
+                    if mode_en_attente == "rapide":
+
+                        for element in contenus_en_attente:
+
+                            try:
+
+                                client_reprise.files.delete(
+                                    name=element.name
+                                )
+
+                            except Exception:
+
+                                pass
+
                     del st.session_state[
                         "contenus_textuels_en_attente"
                     ]
@@ -3385,6 +4148,10 @@ if st.session_state.get("contenus_textuels_en_attente"):
 
                     st.session_state.pop(
                         "type_erreur_gemini", None
+                    )
+
+                    st.session_state.pop(
+                        "mode_en_attente", None
                     )
 
                     titre_cours_attente = st.session_state.pop(
@@ -3429,7 +4196,23 @@ if st.session_state.get("contenus_textuels_en_attente"):
 
                     else:
 
-                        # Fin de la chaîne : on abandonne.
+                        # Fin de la chaîne : on abandonne, et
+                        # on nettoie les fichiers Gemini si
+                        # mode rapide.
+                        if mode_en_attente == "rapide":
+
+                            for element in contenus_en_attente:
+
+                                try:
+
+                                    client_reprise.files.delete(
+                                        name=element.name
+                                    )
+
+                                except Exception:
+
+                                    pass
+
                         del st.session_state[
                             "contenus_textuels_en_attente"
                         ]
@@ -3438,6 +4221,10 @@ if st.session_state.get("contenus_textuels_en_attente"):
 
                         st.session_state.pop(
                             "type_erreur_gemini", None
+                        )
+
+                        st.session_state.pop(
+                            "mode_en_attente", None
                         )
 
                         st.session_state.pop(
