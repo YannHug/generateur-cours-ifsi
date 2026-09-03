@@ -16,6 +16,13 @@ from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 
 
+class QuotaEpuiseeError(Exception):
+    """Levée quand Gemini renvoie un 429 (quota gratuit
+    épuisé) — distincte d'un 503 passager, car réessayer ne
+    sert à rien avant la réinitialisation du quota."""
+    pass
+
+
 # ============================================================
 # CONFIGURATION
 # ============================================================
@@ -1073,6 +1080,19 @@ def appeler_gemini_avec_reprise(client, model, contents, tentatives=4):
                 contents=contents
             )
 
+        except genai_errors.ClientError as e:
+
+            message = str(e)
+
+            if (
+                getattr(e, "code", None) == 429
+                or "RESOURCE_EXHAUSTED" in message
+            ):
+
+                raise QuotaEpuiseeError(message) from e
+
+            raise
+
         except genai_errors.ServerError as e:
 
             if essai == tentatives - 1:
@@ -1090,6 +1110,47 @@ def appeler_gemini_avec_reprise(client, model, contents, tentatives=4):
             )
 
             time.sleep(delai)
+
+
+def afficher_erreur_quota():
+
+    st.error(
+        """
+❌ Quota gratuit quotidien épuisé pour ce modèle.
+
+Le niveau gratuit de Gemini limite le nombre de requêtes
+par jour (généralement 20/jour pour ce modèle). Tu as
+atteint cette limite avec tes tests d'aujourd'hui.
+
+**Deux options :**
+- Attends la réinitialisation du quota (à minuit, heure du
+  Pacifique — environ 8h-9h du matin en France selon la
+  saison) ;
+- Utilise une clé API liée à un compte avec facturation
+  activée pour continuer dès maintenant (coût très faible,
+  quelques centimes par fiche).
+"""
+    )
+
+
+def afficher_erreur_surcharge():
+
+    st.error(
+        """
+❌ Gemini reste indisponible malgré plusieurs tentatives.
+
+Ce n'est pas lié à ton compte ni à ton quota : les serveurs
+Gemini du niveau gratuit sont temporairement saturés (ça
+touche tous les comptes gratuits, pas seulement le tien).
+
+**Que faire :**
+- Réessaie dans quelques minutes, ça se résorbe
+  généralement vite ;
+- Si c'est urgent, une clé API liée à un compte avec
+  facturation activée est nettement moins sujette à ce
+  genre de saturation.
+"""
+    )
 
 
 def uploader_audio_gemini(
@@ -1474,12 +1535,15 @@ RÈGLES
 # gratuit. À réajuster si des dépassements de TPM réels
 # (pas juste des 503 ponctuels) apparaissent dans le tableau
 # de bord.
-# TEST TEMPORAIRE : découpage désactivé (seuil très haut) pour
-# vérifier si un seul gros appel se comporte mieux ou moins
-# bien que plusieurs appels séquentiels sur un lot de 15
-# fichiers. À remettre à une valeur raisonnable (ex. 10)
-# après ce test.
-TAILLE_MAX_SOUS_LOT = 999
+#
+# Note : un test à 999 (découpage désactivé) a été tenté sur
+# un lot de 15 fichiers pour départager "1 gros appel" vs
+# "plusieurs appels séquentiels", mais il a buté sur un 429
+# (quota journalier de 20 requêtes/jour épuisé, cumulé par
+# tous les tests de la journée) avant de pouvoir observer un
+# éventuel dépassement de tokens — donc non concluant sur ce
+# point précis. Remis à 10 par prudence.
+TAILLE_MAX_SOUS_LOT = 10
 
 
 def creer_fiche_finale(
@@ -1533,6 +1597,14 @@ survolée pendant le cours.
             model_name,
             contenu_requete
         )
+
+    except QuotaEpuiseeError:
+
+        raise
+
+    except genai_errors.ServerError:
+
+        raise
 
     except Exception as e:
 
@@ -1638,6 +1710,14 @@ RÈGLES :
             contenu_requete
         )
 
+    except QuotaEpuiseeError:
+
+        raise
+
+    except genai_errors.ServerError:
+
+        raise
+
     except Exception as e:
 
         st.error(
@@ -1723,6 +1803,14 @@ NOTES DES DIFFÉRENTS LOTS
             prompt
         )
 
+    except QuotaEpuiseeError:
+
+        raise
+
+    except genai_errors.ServerError:
+
+        raise
+
     except Exception as e:
 
         st.error(
@@ -1750,67 +1838,81 @@ NOTES DES DIFFÉRENTS LOTS
 
 def generer_fiche_finale(client, fichiers_geminis, model_name):
 
-    if len(fichiers_geminis) <= TAILLE_MAX_SOUS_LOT:
+    try:
 
-        return creer_fiche_finale(
-            client,
-            fichiers_geminis,
-            model_name
-        )
+        if len(fichiers_geminis) <= TAILLE_MAX_SOUS_LOT:
 
-
-    st.write(
-        f"↪️ {len(fichiers_geminis)} fichiers au total — "
-        f"découpage en sous-lots de {TAILLE_MAX_SOUS_LOT} "
-        f"maximum pour rester sous les plafonds de l'API."
-    )
-
-    sous_lots = [
-        fichiers_geminis[i:i + TAILLE_MAX_SOUS_LOT]
-        for i in range(
-            0, len(fichiers_geminis), TAILLE_MAX_SOUS_LOT
-        )
-    ]
-
-    notes_par_lot = []
-
-    for i, sous_lot in enumerate(sous_lots):
-
-        notes = creer_notes_sous_lot(
-            client,
-            sous_lot,
-            model_name,
-            i + 1,
-            len(sous_lots)
-        )
-
-        if notes:
-
-            notes_par_lot.append(notes)
-
-        else:
-
-            st.warning(
-                f"⚠️ Le lot {i + 1}/{len(sous_lots)} n'a pas "
-                f"pu être analysé — il sera absent de la "
-                f"fiche finale."
+            return creer_fiche_finale(
+                client,
+                fichiers_geminis,
+                model_name
             )
 
 
-    if not notes_par_lot:
-
-        st.error(
-            "❌ Aucun lot n'a pu être analysé."
+        st.write(
+            f"↪️ {len(fichiers_geminis)} fichiers au total — "
+            f"découpage en sous-lots de {TAILLE_MAX_SOUS_LOT} "
+            f"maximum pour rester sous les plafonds de l'API."
         )
+
+        sous_lots = [
+            fichiers_geminis[i:i + TAILLE_MAX_SOUS_LOT]
+            for i in range(
+                0, len(fichiers_geminis), TAILLE_MAX_SOUS_LOT
+            )
+        ]
+
+        notes_par_lot = []
+
+        for i, sous_lot in enumerate(sous_lots):
+
+            notes = creer_notes_sous_lot(
+                client,
+                sous_lot,
+                model_name,
+                i + 1,
+                len(sous_lots)
+            )
+
+            if notes:
+
+                notes_par_lot.append(notes)
+
+            else:
+
+                st.warning(
+                    f"⚠️ Le lot {i + 1}/{len(sous_lots)} n'a pas "
+                    f"pu être analysé — il sera absent de la "
+                    f"fiche finale."
+                )
+
+
+        if not notes_par_lot:
+
+            st.error(
+                "❌ Aucun lot n'a pu être analysé."
+            )
+
+            return None
+
+
+        return creer_fiche_depuis_notes(
+            client,
+            notes_par_lot,
+            model_name
+        )
+
+    except QuotaEpuiseeError:
+
+        afficher_erreur_quota()
 
         return None
 
+    except genai_errors.ServerError:
 
-    return creer_fiche_depuis_notes(
-        client,
-        notes_par_lot,
-        model_name
-    )
+        afficher_erreur_surcharge()
+
+        return None
 
 
 # ============================================================
