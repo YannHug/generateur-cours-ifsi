@@ -3,6 +3,7 @@ import requests
 from bs4 import BeautifulSoup
 from google import genai
 from google.genai import errors as genai_errors
+from streamlit_local_storage import LocalStorage
 import os
 import time
 import urllib.parse
@@ -3372,9 +3373,20 @@ urls_input = st.text_area(
 )
 
 
+stockage_local = LocalStorage()
+
+cle_gemini_memorisee = (
+    stockage_local.getItem("ifsi_cle_gemini") or ""
+)
+
+cle_groq_memorisee = (
+    stockage_local.getItem("ifsi_cle_groq") or ""
+)
+
 cle_api_utilisateur = st.text_input(
     "🔑 Ta clé API Gemini (gratuite, obligatoire)",
     type="password",
+    value=cle_gemini_memorisee,
     placeholder="ex : AIzaSyD-9xY2kLmN3pQ4rS5tU6vW7xY8zA9bC0"
 )
 
@@ -3382,8 +3394,60 @@ cle_api_groq = st.text_input(
     "🔑 Ta clé API Groq (gratuite, optionnelle — rend la "
     "transcription beaucoup plus rapide)",
     type="password",
+    value=cle_groq_memorisee,
     placeholder="ex : gsk_..."
 )
+
+memoriser_cles = st.checkbox(
+    "💾 Se souvenir de mes clés sur cet appareil (pour ne "
+    "pas avoir à les recoller à chaque fois)",
+    value=bool(cle_gemini_memorisee or cle_groq_memorisee)
+)
+
+st.caption(
+    "⚠️ Ne coche pas cette case sur un ordinateur partagé "
+    "(bibliothèque, salle informatique) — tes clés seraient "
+    "visibles pour la prochaine personne qui utilise ce "
+    "navigateur sur cette machine."
+)
+
+if memoriser_cles:
+
+    if (
+        cle_api_utilisateur
+        and cle_api_utilisateur != cle_gemini_memorisee
+    ):
+
+        stockage_local.setItem(
+            "ifsi_cle_gemini",
+            cle_api_utilisateur,
+            key="enregistrer_cle_gemini"
+        )
+
+    if (
+        cle_api_groq
+        and cle_api_groq != cle_groq_memorisee
+    ):
+
+        stockage_local.setItem(
+            "ifsi_cle_groq",
+            cle_api_groq,
+            key="enregistrer_cle_groq"
+        )
+
+elif cle_gemini_memorisee or cle_groq_memorisee:
+
+    # La case a été décochée alors que des clés étaient
+    # enregistrées : on les efface du navigateur.
+    stockage_local.deleteItem(
+        "ifsi_cle_gemini",
+        key="oublier_cle_gemini"
+    )
+
+    stockage_local.deleteItem(
+        "ifsi_cle_groq",
+        key="oublier_cle_groq"
+    )
 
 with st.expander("ℹ️ Comment obtenir mes clés API ?"):
 

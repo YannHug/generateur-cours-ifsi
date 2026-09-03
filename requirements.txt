@@ -6,3 +6,4 @@ python-docx
 faster-whisper
 pdfplumber
 groq
+streamlit-local-storage
