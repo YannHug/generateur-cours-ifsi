@@ -5,3 +5,4 @@ venv/
 .streamlit/secrets.toml
 *.mp3
 .DS_Store
+secrets.txt
