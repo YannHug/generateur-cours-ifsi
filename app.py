@@ -231,6 +231,36 @@ def nettoyer_nom_fichier(titre):
     return nom or "Cours_IFSI"
 
 
+def titre_depuis_url_fichier(url):
+
+    # Utilisé en dernier recours quand l'utilisateur colle des
+    # liens directs (vidéo/PDF) plutôt qu'une page de cours à
+    # scanner — dans ce cas, aucun <h1>/<h2> de page n'est
+    # jamais lu, donc titre_cours resterait vide sans ce repli.
+
+    try:
+
+        chemin = urllib.parse.urlparse(url).path
+
+        nom_fichier = urllib.parse.unquote(
+            chemin.rsplit("/", 1)[-1]
+        )
+
+    except Exception:
+
+        return None
+
+    nom_sans_extension = re.sub(
+        r"\.[a-zA-Z0-9]+$",
+        "",
+        nom_fichier
+    )
+
+    titre = nom_sans_extension.replace("_", " ").strip()
+
+    return titre or None
+
+
 def est_lien_video_direct(url):
 
     try:
@@ -438,6 +468,29 @@ def developper_urls(urls, session):
             )
 
             pdfs_finaux.extend(liens_pdf)
+
+
+    if titre_cours is None:
+
+        for url_pdf in pdfs_finaux:
+
+            titre_cours = titre_depuis_url_fichier(url_pdf)
+
+            if titre_cours:
+
+                break
+
+        if titre_cours is None:
+
+            for url_video in urls_finales:
+
+                titre_cours = titre_depuis_url_fichier(
+                    url_video
+                )
+
+                if titre_cours:
+
+                    break
 
 
     return urls_finales, pdfs_finaux, titre_cours
