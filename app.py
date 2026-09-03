@@ -1294,12 +1294,19 @@ def telecharger_et_uploader_pdf(url_pdf, index, session, client):
 
 STRUCTURE_ET_REGLES_FICHE = r"""
 ==============================
-NIVEAU ET PUBLIC — TRÈS IMPORTANT
+POSTURE SOIGNANTE — TRÈS IMPORTANT
 ==============================
 
 Cette fiche est destinée à un(e) étudiant(e) INFIRMIER(ÈRE),
-pas à un étudiant en médecine. Ça change la façon de
-présenter le contenu :
+pas à un étudiant en médecine ou un externe. Ne te contente
+pas de résumer la théorie médicale : relie systématiquement
+la physiopathologie à la clinique infirmière — ce que ça
+change concrètement pour la surveillance, les gestes et les
+priorités d'un(e) IDE.
+
+Imagine aussi que tu es cet(te) étudiant(e) en train de
+prendre des notes PENDANT le cours magistral lui-même — pas
+en train de réécrire un manuel après coup. Ça implique :
 
 - Ne développe PAS en détail les mécanismes moléculaires ou
   immunologiques fins (cascades biochimiques, sous-types de
@@ -1313,8 +1320,30 @@ présenter le contenu :
   infirmier : que surveiller, quand alerter, quel geste
   technique, quelle précaution, quelle règle clinique
   simple à retenir.
+- Capture les INSISTANCES ORALES de l'enseignant quand elles
+  sont perceptibles dans l'audio (un point répété, un
+  avertissement du type "ça, c'est un piège classique à
+  l'examen", un seuil qu'il souligne) — c'est exactement ce
+  qu'un(e) bon(ne) étudiant(e) noterait en marge pendant le
+  cours. Ne vise pas l'exhaustivité à 100% du support, mais
+  ne loupe pas ce que l'enseignant signale comme important.
 - Utilise un vocabulaire clair, évite le jargon médical non
   expliqué.
+
+==============================
+RIGUEUR BIOLOGIQUE
+==============================
+
+- Quand une valeur biologique est mentionnée (numération,
+  ionogramme, etc.), donne-la avec son UNITÉ EXACTE telle
+  qu'énoncée dans le cours (ex. : G/L et non g/L pour une
+  numération leucocytaire, mmol/L et non µmol/L) — ne
+  généralise pas et ne corrige pas silencieusement une
+  unité, mais reste fidèle à ce qui est dit.
+- Signale explicitement les seuils d'alerte vitale évoqués
+  dans le cours (ex. : agranulocytose, hyperkaliémie,
+  thrombopénie sévère...) avec leur valeur si elle est
+  donnée.
 
 ==============================
 STRUCTURE OBLIGATOIRE
@@ -1333,17 +1362,33 @@ donne en quelques lignes maximum :
 Reste concis — c'est un rappel, pas un cours d'anatomo-
 pathologie. Utilise des sous-titres par pathologie/notion.
 
+Si l'enseignant signale un piège d'examen classique ou une
+confusion terminologique fréquente à propos d'une notion de
+cette section, ajoute juste après un mini-titre "### Piège
+classique au partiel IFSI" suivi d'une ou deux puces
+expliquant le piège — uniquement quand c'est réellement
+mentionné ou clairement déductible du cours, pas
+systématiquement pour chaque notion.
+
 
 # 2. Signes cliniques et d'alerte
 
 Présente les pathologies du cours sous forme de TABLEAU
 avec exactement ces colonnes :
 
-| Pathologie | Signes typiques | Signes de gravité / Complications |
+| Pathologie | Signes cliniques (au lit du patient) | Signes paracliniques (examens) | Signes de gravité / Complications |
 
-Une ligne par pathologie ou situation clinique abordée dans
-le cours. Sois concret et clinique (ce que le patient
-présente), pas théorique.
+- Colonne "Signes cliniques" : uniquement ce qu'un(e)
+  infirmier(ère) observe ou recueille directement auprès du
+  patient (inspection, palpation, interrogatoire,
+  constantes) — pas de résultat d'examen.
+- Colonne "Signes paracliniques" : résultats de biologie,
+  imagerie ou autres examens complémentaires, avec unités
+  exactes quand elles sont données dans le cours. Si le
+  cours ne mentionne aucun signe paraclinique pour une
+  pathologie, laisse la cellule avec un tiret "—".
+- Une ligne par pathologie ou situation clinique abordée
+  dans le cours.
 
 
 # 3. Rôle propre et surveillance infirmière (IDE)
@@ -1393,7 +1438,8 @@ RÈGLES
   signale-le plutôt que d'inventer une réponse.
 - Si un passage est incompréhensible, indique-le brièvement.
 - Utilise des tableaux Markdown quand ils facilitent la
-  lecture (obligatoire pour la section 2).
+  lecture (obligatoire pour la section 2, avec exactement
+  les 4 colonnes demandées).
 - Utilise des listes à puces courtes plutôt que des
   paragraphes denses.
 - Mets en gras (**...**) les termes et valeurs clés
@@ -1442,6 +1488,11 @@ def creer_fiche_finale(
     prompt = """
 Tu es un formateur expert en Institut de Formation
 en Soins Infirmiers (IFSI).
+
+Un enseignant (souvent médecin ou expert du domaine) a
+donné ce cours à des étudiants INFIRMIERS. Ta mission est
+d'adapter ce contenu d'expert en fiche de révision de
+niveau infirmier — pas de le retranscrire tel quel.
 
 Tu vas recevoir un ou plusieurs enregistrements audio
 appartenant au même cours (éventuellement en plusieurs
@@ -1521,6 +1572,14 @@ def creer_notes_sous_lot(
     prompt = rf"""
 Tu es un formateur expert en Institut de Formation
 en Soins Infirmiers (IFSI).
+
+Un enseignant (souvent médecin ou expert du domaine) donne
+ce cours à des étudiants INFIRMIERS, pas à des étudiants en
+médecine. Garde ça à l'esprit même à ce stade de prise de
+notes : ne recopie pas mécaniquement chaque détail
+moléculaire ou médical fin de l'enseignant si ça n'a pas
+d'utilité clinique pour un(e) infirmier(ère) — mais
+n'omets aucune pathologie, liste ou exemple clinique.
 
 Tu vas recevoir un SOUS-ENSEMBLE (lot {numero_lot}/{total_lots})
 des enregistrements audio et/ou PDF de supports d'un même
@@ -1620,13 +1679,24 @@ NOTES DU LOT {i + 1}
 Tu es un formateur expert en Institut de Formation
 en Soins Infirmiers (IFSI).
 
-Tu disposes ci-dessous des notes denses prises séparément
-sur plusieurs lots (parties) d'un même cours. Fusionne-les
-et rédige la fiche de révision finale, en développant et
-reformulant si besoin — les notes sont volontairement
-condensées, à toi de rédiger des explications complètes et
-pédagogiques à partir d'elles, sans jamais inventer
-d'information absente des notes.
+Un enseignant (souvent médecin ou expert du domaine) a donné
+un cours à des étudiants infirmiers. Ce cours a été découpé
+en plusieurs lots pour l'analyse, et chaque lot a déjà été
+résumé en notes denses par un premier passage — mais ces
+notes restent une simple étape intermédiaire, pas la
+matière première de ta réflexion.
+
+TA MISSION : à partir de ces notes, reconstitue et ADAPTE le
+contenu du cours original pour en faire une fiche de
+révision de niveau INFIRMIER — pas médecin. Tu ne
+"complètes" pas des notes abstraites : tu transformes le
+savoir d'un expert en un outil clinique pensé pour un(e)
+étudiant(e) infirmier(ère), en gardant à l'esprit tout du
+long qui est le public final.
+
+Fusionne les différents lots, supprime les répétitions, et
+ne perds aucune information importante — mais n'invente
+jamais une information absente des notes.
 
 ==============================
 NOTES DES DIFFÉRENTS LOTS
@@ -1745,6 +1815,18 @@ def generer_fiche_finale(client, fichiers_geminis, model_name):
 COULEUR_TITRE_PRINCIPAL = RGBColor(0x1F, 0x4E, 0x79)   # bleu foncé
 COULEUR_SOUS_TITRE = RGBColor(0x2E, 0x75, 0xB6)         # bleu moyen
 COULEUR_ENTETE_TABLEAU_HEX = "2E75B6"                   # même bleu, en hex
+COULEUR_BANDEAU_HEX = "1F4E79"                          # bleu foncé, en hex
+
+COULEUR_FOND_URGENCE_HEX = "FDEDE8"        # orange très clair
+COULEUR_TEXTE_URGENCE = RGBColor(0xC0, 0x39, 0x2B)  # rouge/orange foncé
+
+COULEUR_FOND_REGLE_OR_HEX = "EAF1FB"       # bleu très clair
+COULEUR_TEXTE_REGLE_OR = COULEUR_TITRE_PRINCIPAL
+
+COULEUR_FOND_PIEGE_HEX = "FFF6DA"          # jaune/ambre très clair
+COULEUR_TEXTE_PIEGE = RGBColor(0x8A, 0x6D, 0x00)    # ambre foncé
+
+COULEUR_LIGNE_ALTERNEE_HEX = "F2F6FC"      # gris-bleu très léger
 
 
 def definir_couleur_fond_cellule(cellule, couleur_hex):
@@ -1758,6 +1840,24 @@ def definir_couleur_fond_cellule(cellule, couleur_hex):
     ombrage.set(qn("w:fill"), couleur_hex)
 
     tcPr.append(ombrage)
+
+
+def definir_marges_cellule(cellule, marge_dxa=150):
+
+    tcPr = cellule._tc.get_or_add_tcPr()
+
+    tcMar = OxmlElement("w:tcMar")
+
+    for cote in ("top", "bottom", "left", "right"):
+
+        element = OxmlElement(f"w:{cote}")
+
+        element.set(qn("w:w"), str(marge_dxa))
+        element.set(qn("w:type"), "dxa")
+
+        tcMar.append(element)
+
+    tcPr.append(tcMar)
 
 
 TABLE_EXPOSANT = str.maketrans("0123456789+-", "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻")
@@ -1915,6 +2015,56 @@ def parser_ligne_tableau(ligne):
     ]
 
 
+def creer_bandeau_titre(document, titre, sous_titre=None):
+
+    table = document.add_table(rows=1, cols=1)
+
+    cellule = table.cell(0, 0)
+
+    definir_couleur_fond_cellule(cellule, COULEUR_BANDEAU_HEX)
+    definir_marges_cellule(cellule, marge_dxa=250)
+
+    p_titre = cellule.paragraphs[0]
+    p_titre.alignment = 1  # centré
+
+    run_titre = p_titre.add_run(titre)
+
+    run_titre.bold = True
+    run_titre.font.size = Pt(22)
+    run_titre.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+
+    if sous_titre:
+
+        p_sous_titre = cellule.add_paragraph()
+        p_sous_titre.alignment = 1  # centré
+
+        run_sous_titre = p_sous_titre.add_run(sous_titre)
+
+        run_sous_titre.font.size = Pt(12)
+        run_sous_titre.font.color.rgb = RGBColor(0xD9, 0xE7, 0xF5)
+
+
+def creer_encadre(document, titre_encadre, icone,
+                   couleur_fond_hex, couleur_texte):
+
+    table = document.add_table(rows=1, cols=1)
+
+    cellule = table.cell(0, 0)
+
+    definir_couleur_fond_cellule(cellule, couleur_fond_hex)
+    definir_marges_cellule(cellule, marge_dxa=150)
+
+    p_titre = cellule.paragraphs[0]
+
+    run_titre = p_titre.add_run(f"{icone} {titre_encadre}")
+
+    run_titre.bold = True
+    run_titre.font.size = Pt(13)
+    run_titre.font.color.rgb = couleur_texte
+
+    return cellule
+
+
 def ajouter_tableau(document, lignes_tableau):
 
     entetes = parser_ligne_tableau(lignes_tableau[0])
@@ -1953,15 +2103,51 @@ def ajouter_tableau(document, lignes_tableau):
         )
 
 
-    for ligne_donnees in lignes_donnees:
+    # Repère la colonne "gravité/complications" pour y ajouter
+    # automatiquement une icône d'alerte.
+    index_colonne_gravite = None
+
+    for i, texte_entete in enumerate(entetes):
+
+        if (
+            "gravité" in texte_entete.lower()
+            or "complication" in texte_entete.lower()
+        ):
+
+            index_colonne_gravite = i
+
+            break
+
+
+    for numero_ligne, ligne_donnees in enumerate(lignes_donnees):
 
         cellules = table.add_row().cells
+
+        # Alternance de couleur (une ligne sur deux, en
+        # commençant par une ligne colorée) pour la lisibilité.
+        if numero_ligne % 2 == 0:
+
+            for cellule in cellules:
+
+                definir_couleur_fond_cellule(
+                    cellule,
+                    COULEUR_LIGNE_ALTERNEE_HEX
+                )
+
 
         for i, valeur in enumerate(ligne_donnees):
 
             if i >= len(cellules):
 
                 break
+
+            if (
+                i == index_colonne_gravite
+                and valeur.strip()
+                and "⚠️" not in valeur
+            ):
+
+                valeur = f"⚠️ {valeur}"
 
             cellules[i].paragraphs[0].text = ""
 
@@ -1971,18 +2157,53 @@ def ajouter_tableau(document, lignes_tableau):
             )
 
 
-def creer_word(texte):
+def ajouter_sommaire(document, texte):
+
+    titres_h1 = []
+
+    for ligne in texte.split("\n"):
+
+        ligne_strip = ligne.strip()
+
+        if ligne_strip.startswith("#") and not ligne_strip.startswith("##"):
+
+            titre = ligne_strip[1:].strip()
+
+            if titre:
+
+                titres_h1.append(titre)
+
+
+    if not titres_h1:
+
+        return
+
+
+    titre_sommaire = document.add_heading("Sommaire", level=2)
+
+    for run in titre_sommaire.runs:
+
+        run.font.color.rgb = COULEUR_SOUS_TITRE
+
+
+    for titre in titres_h1:
+
+        p = document.add_paragraph(style="List Number")
+
+        ajouter_texte_formate(p, titre)
+
+
+def creer_word(texte, sous_titre=None):
 
     document = Document()
 
-    titre_document = document.add_heading(
+    creer_bandeau_titre(
+        document,
         "Fiche de Révision IFSI",
-        0
+        sous_titre
     )
 
-    for run in titre_document.runs:
-
-        run.font.color.rgb = COULEUR_TITRE_PRINCIPAL
+    ajouter_sommaire(document, texte)
 
     lignes = texte.split("\n")
 
@@ -1991,6 +2212,11 @@ def creer_word(texte):
 
     dans_tableau = False
     tampon_tableau = []
+
+    # Conteneur où sont ajoutés les paragraphes courants :
+    # le document lui-même, ou la cellule d'un encadré coloré
+    # (Urgences / Règles d'or) le temps de cette section.
+    conteneur_actif = document
 
     i = 0
 
@@ -2013,7 +2239,7 @@ def creer_word(texte):
                 # police à chasse fixe.
                 if tampon_code:
 
-                    p = document.add_paragraph()
+                    p = conteneur_actif.add_paragraph()
 
                     run = p.add_run(
                         "\n".join(tampon_code)
@@ -2120,6 +2346,55 @@ def creer_word(texte):
                 ligne_strip
             ).strip()
 
+            # On revient au document normal avant de traiter
+            # ce nouveau titre — un encadré éventuellement
+            # ouvert par un titre précédent se referme ici.
+            conteneur_actif = document
+
+            titre_normalise = titre_texte.lower()
+
+            if niveau >= 3 and "urgence" in titre_normalise and "vitale" in titre_normalise:
+
+                conteneur_actif = creer_encadre(
+                    document,
+                    titre_texte,
+                    "🚨",
+                    COULEUR_FOND_URGENCE_HEX,
+                    COULEUR_TEXTE_URGENCE
+                )
+
+                i += 1
+
+                continue
+
+            if niveau >= 3 and "règle" in titre_normalise and "or" in titre_normalise:
+
+                conteneur_actif = creer_encadre(
+                    document,
+                    titre_texte,
+                    "🔑",
+                    COULEUR_FOND_REGLE_OR_HEX,
+                    COULEUR_TEXTE_REGLE_OR
+                )
+
+                i += 1
+
+                continue
+
+            if niveau >= 3 and "piège" in titre_normalise:
+
+                conteneur_actif = creer_encadre(
+                    document,
+                    titre_texte,
+                    "⚡",
+                    COULEUR_FOND_PIEGE_HEX,
+                    COULEUR_TEXTE_PIEGE
+                )
+
+                i += 1
+
+                continue
+
             p = document.add_heading(
                 "",
                 level=niveau
@@ -2153,7 +2428,7 @@ def creer_word(texte):
 
         if correspondance_puce:
 
-            p = document.add_paragraph(
+            p = conteneur_actif.add_paragraph(
                 style="List Bullet"
             )
 
@@ -2178,7 +2453,7 @@ def creer_word(texte):
 
         if correspondance_numero:
 
-            p = document.add_paragraph(
+            p = conteneur_actif.add_paragraph(
                 style="List Number"
             )
 
@@ -2196,7 +2471,7 @@ def creer_word(texte):
         # PARAGRAPHE NORMAL
         # ------------------------------------------------
 
-        p = document.add_paragraph()
+        p = conteneur_actif.add_paragraph()
 
         ajouter_texte_formate(p, ligne_strip)
 
@@ -2695,8 +2970,15 @@ if st.session_state.get("fiche_generee"):
         "### 📄 Télécharger la fiche"
     )
 
+    nom_sans_extension = st.session_state["nom_fichier_docx"]
+
+    if nom_sans_extension.lower().endswith(".docx"):
+
+        nom_sans_extension = nom_sans_extension[:-5]
+
     buffer = creer_word(
-        st.session_state["fiche_generee"]
+        st.session_state["fiche_generee"],
+        sous_titre=nom_sans_extension
     )
 
     colonne_telecharger, colonne_recharger = st.columns(2)
