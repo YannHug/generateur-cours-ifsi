@@ -1410,7 +1410,16 @@ RÈGLES
 # pour rester sous les plafonds de tokens/minute (surtout
 # sensible sur le niveau gratuit) et limiter l'exposition aux
 # 503 sur les très grosses requêtes.
-TAILLE_MAX_SOUS_LOT = 4
+#
+# Fixé à 8 (et non plus 4) : un test réel a montré qu'un
+# découpage trop agressif est contre-productif — il multiplie
+# le nombre d'appels Gemini nécessaires (donc le nombre de
+# chances de tomber sur un 503 "high demand"), alors que des
+# lots de 5-6 fichiers restent largement sous les plafonds de
+# tokens/minute (~150K/250K observés en pratique). Le
+# découpage ne doit se déclencher que pour les gros lots
+# (10+ fichiers) où le risque de dépassement est réel.
+TAILLE_MAX_SOUS_LOT = 8
 
 
 def creer_fiche_finale(
