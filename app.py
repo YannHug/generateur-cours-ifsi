@@ -388,6 +388,16 @@ def developper_urls(urls, session):
 
             continue
 
+        if est_lien_pdf(url):
+
+            st.write(
+                f"📄 Support PDF détecté directement : {url}"
+            )
+
+            pdfs_finaux.append(url)
+
+            continue
+
 
         st.write(
             f"🔎 Page de cours détectée, recherche des "
@@ -2644,23 +2654,51 @@ with st.expander("ℹ️ Comment obtenir ma clé API ?"):
 
 
 MODELES_DISPONIBLES = {
+    "gemini-3.8-flash": (
+        "Gemini 3.8 Flash — recommandé (le plus récent)"
+    ),
     "gemini-3.7-flash": (
-        "Gemini 3.7 Flash — recommandé"
+        "Gemini 3.7 Flash — éprouvé, très fiable"
+    ),
+    "gemini-2.5-flash": (
+        "Gemini 2.5 Flash — génération différente, bon repli"
     ),
     "gemini-3.5-flash-lite": (
-        "Gemini 3.5 Flash-Lite — moins de limitations"
+        "Gemini 3.5 Flash-Lite — le plus léger"
     ),
 }
 
-# Modèle de repli proposé quand le modèle choisi devient
-# indisponible (503 persistant) ou a épuisé son quota
-# journalier (429) — chaque modèle a son propre quota séparé
-# sur le niveau gratuit, donc basculer peut débloquer la
-# situation sans attendre ni payer.
-MODELE_SECOURS = {
-    "gemini-3.7-flash": "gemini-3.5-flash-lite",
-    "gemini-3.5-flash-lite": "gemini-3.7-flash",
-}
+# Chaîne de repli ORDONNÉE, utilisée quand le modèle choisi
+# devient indisponible (503 persistant) ou a épuisé son
+# quota journalier (429). Chaque modèle a son propre quota
+# séparé sur le niveau gratuit, donc basculer vers le suivant
+# de la chaîne peut débloquer la situation sans attendre ni
+# payer. Gemini 2.5 Flash est délibérément placé avant
+# 3.5 Flash-Lite : c'est une génération différente de 3.7/3.8,
+# donc probablement moins exposée à la même vague de forte
+# demande que la gamme 3.x.
+CHAINE_MODELES_SECOURS = [
+    "gemini-3.8-flash",
+    "gemini-3.7-flash",
+    "gemini-2.5-flash",
+    "gemini-3.5-flash-lite",
+]
+
+
+def modele_secours_suivant(modele_actuel):
+
+    if modele_actuel not in CHAINE_MODELES_SECOURS:
+
+        return None
+
+    index = CHAINE_MODELES_SECOURS.index(modele_actuel)
+
+    if index + 1 < len(CHAINE_MODELES_SECOURS):
+
+        return CHAINE_MODELES_SECOURS[index + 1]
+
+    return None
+
 
 modele_choisi = st.selectbox(
     "🤖 Modèle Gemini",
@@ -2674,14 +2712,23 @@ with st.expander("ℹ️ Quelle différence entre les modèles ?"):
     st.write(
         "D'après nos tests sur des cours à plusieurs "
         "sujets :\n\n"
-        "• **Gemini 3.7 Flash** couvre systématiquement "
-        "l'intégralité du contenu (aucun sujet oublié). "
-        "C'est le choix recommandé pour ne rien perdre.\n\n"
-        "• **Gemini 3.5 Flash-Lite** est soumis à moins de "
-        "limitations d'usage, mais a parfois oublié une "
-        "partie des sujets sur des cours couvrant plusieurs "
-        "thèmes distincts lors de nos tests. À réserver aux "
-        "cours courts / à un seul sujet."
+        "• **Gemini 3.8 Flash** est le plus récent modèle "
+        "Flash de Google — potentiellement la meilleure "
+        "qualité disponible actuellement, à confirmer à "
+        "l'usage.\n\n"
+        "• **Gemini 3.7 Flash** est celui qu'on a le plus "
+        "testé : couvre systématiquement l'intégralité du "
+        "contenu (aucun sujet oublié).\n\n"
+        "• **Gemini 2.5 Flash** est une génération "
+        "différente (pas 3.x) — un bon choix de repli si "
+        "3.7/3.8 sont saturés, puisqu'ils partagent "
+        "probablement moins la même charge.\n\n"
+        "• **Gemini 3.5 Flash-Lite** est le plus léger, mais "
+        "a parfois oublié une partie des sujets sur des "
+        "cours couvrant plusieurs thèmes distincts lors de "
+        "nos tests. À réserver aux cours courts / à un seul "
+        "sujet, ou en dernier recours si tous les autres "
+        "modèles sont indisponibles."
     )
 
 
@@ -3098,7 +3145,7 @@ un lien vers un fichier MP3 accessible.
 if st.session_state.get("fichiers_geminis_en_attente"):
 
     modele_echoue = st.session_state.get("modele_echoue")
-    modele_secours = MODELE_SECOURS.get(modele_echoue)
+    modele_secours = modele_secours_suivant(modele_echoue)
 
     if modele_secours:
 
@@ -3146,6 +3193,7 @@ if st.session_state.get("fichiers_geminis_en_attente"):
                 )
 
                 fiche_reprise = None
+                echec_reprise = False
 
                 with st.spinner(
                     f"Nouvelle tentative avec "
@@ -3165,40 +3213,41 @@ if st.session_state.get("fichiers_geminis_en_attente"):
                         genai_errors.ServerError
                     ):
 
+                        echec_reprise = True
+
                         st.error(
                             f"❌ {libelle_secours} est lui "
                             f"aussi indisponible pour "
-                            f"l'instant. Réessaie plus tard."
+                            f"l'instant."
                         )
 
-
-                # Nettoyage des fichiers, qu'il y ait eu
-                # succès ou échec cette fois
-                for fichier_gemini in fichiers_en_attente:
-
-                    try:
-
-                        client_reprise.files.delete(
-                            name=fichier_gemini.name
-                        )
-
-                    except Exception:
-
-                        pass
-
-
-                del st.session_state[
-                    "fichiers_geminis_en_attente"
-                ]
-
-                del st.session_state["modele_echoue"]
-
-                titre_cours_attente = st.session_state.pop(
-                    "titre_cours_en_attente",
-                    None
-                )
 
                 if fiche_reprise:
+
+                    # Succès : nettoyage des fichiers,
+                    # sauvegarde du résultat, fin de la chaîne.
+                    for fichier_gemini in fichiers_en_attente:
+
+                        try:
+
+                            client_reprise.files.delete(
+                                name=fichier_gemini.name
+                            )
+
+                        except Exception:
+
+                            pass
+
+                    del st.session_state[
+                        "fichiers_geminis_en_attente"
+                    ]
+
+                    del st.session_state["modele_echoue"]
+
+                    titre_cours_attente = st.session_state.pop(
+                        "titre_cours_en_attente",
+                        None
+                    )
 
                     st.session_state["fiche_generee"] = (
                         fiche_reprise
@@ -3211,6 +3260,55 @@ if st.session_state.get("fichiers_geminis_en_attente"):
                     )
 
                     st.rerun()
+
+                elif echec_reprise and modele_secours_suivant(
+                    modele_secours
+                ):
+
+                    # Ce modèle de secours a aussi échoué,
+                    # mais il en reste un dans la chaîne : on
+                    # garde les fichiers et on avance d'un cran
+                    # pour proposer le suivant au prochain tour.
+                    st.session_state["modele_echoue"] = (
+                        modele_secours
+                    )
+
+                    st.rerun()
+
+                else:
+
+                    # Fin de la chaîne ou échec non lié au
+                    # quota/à la surcharge : on abandonne et on
+                    # nettoie.
+                    for fichier_gemini in fichiers_en_attente:
+
+                        try:
+
+                            client_reprise.files.delete(
+                                name=fichier_gemini.name
+                            )
+
+                        except Exception:
+
+                            pass
+
+                    del st.session_state[
+                        "fichiers_geminis_en_attente"
+                    ]
+
+                    del st.session_state["modele_echoue"]
+
+                    st.session_state.pop(
+                        "titre_cours_en_attente", None
+                    )
+
+                    if echec_reprise:
+
+                        st.error(
+                            "❌ Tous les modèles de la chaîne "
+                            "de repli sont actuellement "
+                            "indisponibles."
+                        )
 
 
 # ============================================================
