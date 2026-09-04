@@ -1505,7 +1505,7 @@ def telecharger_et_extraire_pdf(
     # normal mode gratuit).
     # retourner_bytes=True : renvoie le couple (texte, octets
     # bruts du PDF) — utilisé par le paquet de téléchargement
-    # "sans IA", qui doit inclure le PDF original tel quel, pas
+    # "sans Gemini", qui doit inclure le PDF original tel quel, pas
     # seulement son texte extrait.
 
     def echec():
@@ -3685,13 +3685,13 @@ with st.expander("⚙️ Réglages avancés (facultatif)"):
 # ============================================================
 
 # ============================================================
-# CACHE PARTAGÉ ENTRE LES DEUX BOUTONS ("avec IA" / "sans IA")
+# CACHE PARTAGÉ ENTRE LES DEUX BOUTONS ("avec Gemini" / "sans Gemini")
 # ============================================================
 #
 # Évite de re-télécharger/re-transcrire si l'un des deux
 # chemins a déjà collecté les transcriptions + PDF pour les
 # mêmes URL (typiquement : Gemini a été tenté et a échoué en
-# mode gratuit, puis l'utilisateur clique sur "sans IA" — ou
+# mode gratuit, puis l'utilisateur clique sur "sans Gemini" — ou
 # l'inverse). Uniquement valable pour le contenu textuel du
 # mode gratuit (transcriptions + texte PDF) : en mode rapide,
 # les contenus sont des fichiers déjà envoyés à Gemini, donc
@@ -3783,7 +3783,7 @@ def collecter_et_empaqueter_sans_ia(urls_brutes, cle_api_groq):
     pdfs_bruts = []  # liste de (nom_fichier, octets)
 
     with st.status(
-        "Collecte des documents (sans IA)...",
+        "Collecte des documents (sans Gemini)...",
         expanded=True
     ) as status:
 
@@ -3949,10 +3949,12 @@ colonne_ia, colonne_sans_ia = st.columns(2)
 with colonne_sans_ia:
 
     telechargement_demande = st.button(
-        "📥 Télécharger sans passer par l'IA",
+        "📥 Télécharger sans passer par Gemini",
         help=(
-            "Récupère directement les transcriptions et les "
-            "PDF de support dans un .zip, sans appeler Gemini "
+            "Récupère directement les transcriptions (Groq si "
+            "une clé est fournie, sinon Whisper local — plus "
+            "lent mais fonctionne quand même) et les PDF de "
+            "support dans un .zip, sans jamais appeler Gemini "
             "— utile si Gemini est saturé ou pour aller plus "
             "vite."
         )
@@ -4025,7 +4027,7 @@ if bouton_generer:
 
     # Conservé tel quel (avant expansion par developper_urls)
     # pour servir de clé de cache commune avec le bouton
-    # "sans IA", qui utilise les mêmes URL brutes.
+    # "sans Gemini", qui utilise les mêmes URL brutes.
     urls_brutes_saisies = urls
 
 
@@ -4131,7 +4133,7 @@ https://aistudio.google.com/apikey
     contenus_a_traiter = []
 
     # Octets bruts des PDF de support (mode gratuit uniquement)
-    # — alimente le cache partagé avec le bouton "sans IA".
+    # — alimente le cache partagé avec le bouton "sans Gemini".
     pdfs_bruts_gratuit = []
 
     # Fichiers Gemini des PDF de support (mode gratuit) — les
@@ -4346,7 +4348,7 @@ https://aistudio.google.com/apikey
 
 
         # ----------------------------------------------------
-        # Alimente le cache partagé avec le bouton "sans IA"
+        # Alimente le cache partagé avec le bouton "sans Gemini"
         # (uniquement pertinent en mode gratuit : contenus déjà
         # textuels, réutilisables tels quels pour le .txt/.zip)
         # ----------------------------------------------------
@@ -4593,9 +4595,9 @@ if st.session_state.get("contenus_textuels_en_attente"):
     # ⚡ rapide, les contenus sont des références de fichiers
     # Gemini déjà uploadés : rien de local à proposer ici.
     # Même .zip (transcriptions .txt + PDF originaux) que le
-    # bouton "sans IA", pour que l'utilisateur retrouve
+    # bouton "sans Gemini", pour que l'utilisateur retrouve
     # exactement les mêmes fichiers, qu'il ait cliqué sur
-    # "sans IA" directement ou qu'il soit tombé sur le mur de
+    # "sans Gemini" directement ou qu'il soit tombé sur le mur de
     # la surcharge Gemini.
     if mode_en_attente_export == "gratuit":
 
