@@ -12,6 +12,7 @@ import re
 import subprocess
 import shutil
 import glob
+import zipfile
 from docx import Document
 from docx.shared import Pt, RGBColor
 from docx.oxml.ns import qn
@@ -1492,7 +1493,25 @@ def transcrire_audio(fichier_local, numero, cle_api_groq):
 # diapositives, seulement le texte qu'elles contiennent.
 # ============================================================
 
-def telecharger_et_extraire_pdf(url_pdf, index, session):
+def telecharger_et_extraire_pdf(
+    url_pdf,
+    index,
+    session,
+    retourner_bytes=False
+):
+
+    # retourner_bytes=False (défaut) : comportement d'origine,
+    # ne renvoie que le texte extrait (utilisé par le pipeline
+    # normal mode gratuit).
+    # retourner_bytes=True : renvoie le couple (texte, octets
+    # bruts du PDF) — utilisé par le paquet de téléchargement
+    # "sans IA", qui doit inclure le PDF original tel quel, pas
+    # seulement son texte extrait.
+
+    def echec():
+
+        return (None, None) if retourner_bytes else None
+
 
     try:
 
@@ -1509,7 +1528,7 @@ def telecharger_et_extraire_pdf(url_pdf, index, session):
             f"⚠️ Support PDF {index} inaccessible : {e}"
         )
 
-        return None
+        return echec()
 
 
     content_type = reponse.headers.get(
@@ -1526,7 +1545,7 @@ def telecharger_et_extraire_pdf(url_pdf, index, session):
             f"valide — ignoré."
         )
 
-        return None
+        return echec()
 
 
     st.write(
@@ -1556,7 +1575,7 @@ def telecharger_et_extraire_pdf(url_pdf, index, session):
             f"⚠️ Erreur d'extraction du support {index} : {e}"
         )
 
-        return None
+        return echec()
 
 
     if not texte:
@@ -1567,7 +1586,10 @@ def telecharger_et_extraire_pdf(url_pdf, index, session):
             f"scannées, non détectable par extraction directe)."
         )
 
-        return None
+        # Le texte est vide mais le PDF lui-même reste valide
+        # et utile dans le paquet de téléchargement — on le
+        # renvoie quand même dans ce cas.
+        return (None, reponse.content) if retourner_bytes else None
 
 
     st.success(
@@ -1575,7 +1597,7 @@ def telecharger_et_extraire_pdf(url_pdf, index, session):
         f"({len(texte.split())} mots)."
     )
 
-    return texte
+    return (texte, reponse.content) if retourner_bytes else texte
 
 
 # ============================================================
@@ -3583,13 +3605,336 @@ with st.expander("⚙️ Réglages avancés (facultatif)"):
 
 
 # ============================================================
-# BOUTON
+# FONCTION : COLLECTE + EMPAQUETAGE "SANS IA"
+# ============================================================
+#
+# Chemin alternatif proposé dès le départ (pas seulement en
+# secours après un échec Gemini) : transcrit l'audio (Groq
+# prioritaire, repli local) et récupère les PDF de support,
+# sans jamais appeler Gemini. Retourne un .zip contenant le
+# prompt complet (.txt, prêt à coller dans une autre IA) et
+# les PDF originaux. Utile quand Gemini est saturé et que
+# l'utilisateur ne veut pas perdre de temps à attendre.
 # ============================================================
 
-if st.button(
-    "🚀 Générer la fiche complète",
-    type="primary"
+# ============================================================
+# CACHE PARTAGÉ ENTRE LES DEUX BOUTONS ("avec IA" / "sans IA")
+# ============================================================
+#
+# Évite de re-télécharger/re-transcrire si l'un des deux
+# chemins a déjà collecté les transcriptions + PDF pour les
+# mêmes URL (typiquement : Gemini a été tenté et a échoué en
+# mode gratuit, puis l'utilisateur clique sur "sans IA" — ou
+# l'inverse). Uniquement valable pour le contenu textuel du
+# mode gratuit (transcriptions + texte PDF) : en mode rapide,
+# les contenus sont des fichiers déjà envoyés à Gemini, donc
+# rien de commun à réutiliser ici.
+
+def cle_cache_collecte(urls_brutes):
+
+    return "\n".join(urls_brutes)
+
+
+def lire_cache_collecte(urls_brutes):
+
+    cache = st.session_state.get("cache_collecte_sans_ia")
+
+    if cache and cache.get("cle") == cle_cache_collecte(
+        urls_brutes
+    ):
+
+        return cache
+
+    return None
+
+
+def ecrire_cache_collecte(
+    urls_brutes,
+    contenus_textuels,
+    pdfs_bruts,
+    titre_cours
 ):
+
+    st.session_state["cache_collecte_sans_ia"] = {
+        "cle": cle_cache_collecte(urls_brutes),
+        "contenus_textuels": contenus_textuels,
+        "pdfs_bruts": pdfs_bruts,
+        "titre_cours": titre_cours,
+    }
+
+
+def collecter_et_empaqueter_sans_ia(urls_brutes, cle_api_groq):
+
+    cache = lire_cache_collecte(urls_brutes)
+
+    if cache:
+
+        st.info(
+            "♻️ Réutilisation des transcriptions et PDF déjà "
+            "collectés pour ces URL — aucun nouveau "
+            "téléchargement ni appel réseau."
+        )
+
+        contenus_textuels = cache["contenus_textuels"]
+        pdfs_bruts = cache["pdfs_bruts"]
+        titre_cours = cache["titre_cours"]
+
+        return empaqueter_zip(
+            contenus_textuels,
+            pdfs_bruts,
+            titre_cours
+        )
+
+
+    session = requests.Session()
+
+    session.headers.update({
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 "
+            "(KHTML, like Gecko) "
+            "Chrome/140.0 Safari/537.36"
+        )
+    })
+
+    urls, pdfs_detectes, titre_cours = developper_urls(
+        urls_brutes,
+        session
+    )
+
+    if not urls:
+
+        st.error(
+            "❌ Aucun lien vidéo n'a pu être trouvé à partir "
+            "des URL fournies."
+        )
+
+        return None, None
+
+
+    contenus_textuels = []
+    pdfs_bruts = []  # liste de (nom_fichier, octets)
+
+    with st.status(
+        "Collecte des documents (sans IA)...",
+        expanded=True
+    ) as status:
+
+        for i, url in enumerate(urls):
+
+            st.write(
+                f"## 🎧 Cours {i + 1}/{len(urls)}"
+            )
+
+            fichier_local = recuperer_audio(
+                url,
+                i,
+                session
+            )
+
+            if not fichier_local:
+
+                st.warning(
+                    f"⚠️ Aucun audio trouvé pour : {url}"
+                )
+
+                continue
+
+            if ACCELERATION_ACTIVEE:
+
+                fichier_local = accelerer_audio(
+                    fichier_local,
+                    i + 1
+                )
+
+            texte_audio = transcrire_audio(
+                fichier_local,
+                i + 1,
+                cle_api_groq
+            )
+
+            try:
+
+                os.remove(fichier_local)
+
+            except Exception:
+
+                pass
+
+            if texte_audio:
+
+                contenus_textuels.append(
+                    f"==============================\n"
+                    f"TRANSCRIPTION AUDIO {i + 1}\n"
+                    f"==============================\n\n"
+                    f"{texte_audio}"
+                )
+
+
+        if pdfs_detectes:
+
+            st.write(
+                f"## 📄 Supports PDF ({len(pdfs_detectes)})"
+            )
+
+            for j, url_pdf in enumerate(pdfs_detectes):
+
+                texte_pdf, octets_pdf = (
+                    telecharger_et_extraire_pdf(
+                        url_pdf,
+                        j + 1,
+                        session,
+                        retourner_bytes=True
+                    )
+                )
+
+                if texte_pdf:
+
+                    contenus_textuels.append(
+                        f"==========================\n"
+                        f"SUPPORT PDF {j + 1}\n"
+                        f"==========================\n\n"
+                        f"{texte_pdf}"
+                    )
+
+                if octets_pdf:
+
+                    pdfs_bruts.append(
+                        (f"support_{j + 1}.pdf", octets_pdf)
+                    )
+
+
+        if not contenus_textuels and not pdfs_bruts:
+
+            status.update(
+                label="❌ Rien n'a pu être récupéré",
+                state="error",
+                expanded=True
+            )
+
+            st.error(
+                "Aucune transcription ni aucun support PDF "
+                "n'a pu être obtenu."
+            )
+
+            return None, None
+
+        status.update(
+            label="✅ Documents collectés avec succès !",
+            state="complete"
+        )
+
+
+    ecrire_cache_collecte(
+        urls_brutes,
+        contenus_textuels,
+        pdfs_bruts,
+        titre_cours
+    )
+
+
+    return empaqueter_zip(
+        contenus_textuels,
+        pdfs_bruts,
+        titre_cours
+    )
+
+
+def empaqueter_zip(contenus_textuels, pdfs_bruts, titre_cours):
+
+    tampon_zip = io.BytesIO()
+
+    with zipfile.ZipFile(
+        tampon_zip,
+        "w",
+        zipfile.ZIP_DEFLATED
+    ) as archive:
+
+        if contenus_textuels:
+
+            prompt_txt = construire_prompt_fiche_texte(
+                contenus_textuels
+            )
+
+            archive.writestr(
+                "transcriptions_cours_ifsi.txt",
+                prompt_txt
+            )
+
+        for nom_fichier, octets_pdf in pdfs_bruts:
+
+            archive.writestr(
+                nom_fichier,
+                octets_pdf
+            )
+
+    tampon_zip.seek(0)
+
+    return tampon_zip.getvalue(), titre_cours
+
+
+# ============================================================
+# BOUTONS
+# ============================================================
+
+colonne_ia, colonne_sans_ia = st.columns(2)
+
+with colonne_sans_ia:
+
+    telechargement_demande = st.button(
+        "📥 Télécharger sans passer par l'IA",
+        help=(
+            "Récupère directement les transcriptions et les "
+            "PDF de support dans un .zip, sans appeler Gemini "
+            "— utile si Gemini est saturé ou pour aller plus "
+            "vite."
+        )
+    )
+
+if telechargement_demande:
+
+    urls_zip = [
+        url.strip()
+        for url in urls_input.splitlines()
+        if url.strip()
+    ]
+
+    if not urls_zip:
+
+        st.warning(
+            "⚠️ Ajoute au moins une URL."
+        )
+
+        st.stop()
+
+    contenu_zip, titre_cours_zip = (
+        collecter_et_empaqueter_sans_ia(
+            urls_zip,
+            cle_api_groq
+        )
+    )
+
+    if contenu_zip:
+
+        st.download_button(
+            label="📦 Télécharger le .zip (transcriptions + PDF)",
+            data=contenu_zip,
+            file_name=(
+                nettoyer_nom_fichier(titre_cours_zip)
+                + "_documents.zip"
+            ),
+            mime="application/zip"
+        )
+
+
+with colonne_ia:
+
+    bouton_generer = st.button(
+        "🚀 Générer la fiche complète",
+        type="primary"
+    )
+
+if bouton_generer:
 
 
     # --------------------------------------------------------
@@ -3610,6 +3955,11 @@ if st.button(
         )
 
         st.stop()
+
+    # Conservé tel quel (avant expansion par developper_urls)
+    # pour servir de clé de cache commune avec le bouton
+    # "sans IA", qui utilise les mêmes URL brutes.
+    urls_brutes_saisies = urls
 
 
     # --------------------------------------------------------
@@ -3712,6 +4062,11 @@ https://aistudio.google.com/apikey
     # soit des fichiers Gemini (mode rapide — audio/PDF envoyés
     # directement), selon le mode choisi par l'utilisateur.
     contenus_a_traiter = []
+
+    # Octets bruts des PDF de support (mode gratuit uniquement)
+    # — sert uniquement à alimenter le cache partagé avec le
+    # bouton "sans IA", pas envoyé à Gemini.
+    pdfs_bruts_gratuit = []
 
 
     # ========================================================
@@ -3874,10 +4229,13 @@ https://aistudio.google.com/apikey
 
                 if mode_traitement == "gratuit":
 
-                    texte_pdf = telecharger_et_extraire_pdf(
-                        url_pdf,
-                        j + 1,
-                        session
+                    texte_pdf, octets_pdf = (
+                        telecharger_et_extraire_pdf(
+                            url_pdf,
+                            j + 1,
+                            session,
+                            retourner_bytes=True
+                        )
                     )
 
                     if texte_pdf:
@@ -3887,6 +4245,12 @@ https://aistudio.google.com/apikey
                             f"SUPPORT PDF {j + 1}\n"
                             f"==========================\n\n"
                             f"{texte_pdf}"
+                        )
+
+                    if octets_pdf:
+
+                        pdfs_bruts_gratuit.append(
+                            (f"support_{j + 1}.pdf", octets_pdf)
                         )
 
                 else:
@@ -3905,6 +4269,22 @@ https://aistudio.google.com/apikey
                         contenus_a_traiter.append(
                             fichier_pdf_gemini
                         )
+
+
+        # ----------------------------------------------------
+        # Alimente le cache partagé avec le bouton "sans IA"
+        # (uniquement pertinent en mode gratuit : contenus déjà
+        # textuels, réutilisables tels quels pour le .txt/.zip)
+        # ----------------------------------------------------
+
+        if mode_traitement == "gratuit" and contenus_a_traiter:
+
+            ecrire_cache_collecte(
+                urls_brutes_saisies,
+                contenus_a_traiter,
+                pdfs_bruts_gratuit,
+                titre_cours
+            )
 
 
         # ====================================================
