@@ -1715,7 +1715,18 @@ def uploader_audio_gemini(client, fichier_local, numero):
     return fichier_pret
 
 
-def telecharger_et_uploader_pdf(url_pdf, index, session, client):
+def telecharger_et_uploader_pdf(
+    url_pdf,
+    index,
+    session,
+    client,
+    retourner_bytes=False
+):
+
+    def echec():
+
+        return (None, None) if retourner_bytes else None
+
 
     try:
 
@@ -1732,7 +1743,7 @@ def telecharger_et_uploader_pdf(url_pdf, index, session, client):
             f"⚠️ Support PDF {index} inaccessible : {e}"
         )
 
-        return None
+        return echec()
 
 
     content_type = reponse.headers.get(
@@ -1749,7 +1760,7 @@ def telecharger_et_uploader_pdf(url_pdf, index, session, client):
             f"valide — ignoré."
         )
 
-        return None
+        return echec()
 
 
     nom_fichier = f"support_{index}.pdf"
@@ -1766,7 +1777,7 @@ def telecharger_et_uploader_pdf(url_pdf, index, session, client):
             f"⚠️ Impossible d'enregistrer le support {index} : {e}"
         )
 
-        return None
+        return echec()
 
 
     st.write(
@@ -1785,7 +1796,7 @@ def telecharger_et_uploader_pdf(url_pdf, index, session, client):
             f"⚠️ Erreur d'upload du support {index} : {e}"
         )
 
-        return None
+        return echec()
 
     finally:
 
@@ -1813,12 +1824,16 @@ def telecharger_et_uploader_pdf(url_pdf, index, session, client):
 
             pass
 
-        return None
+        return echec()
 
 
     st.success(
         f"✅ Support PDF {index} envoyé et prêt."
     )
+
+    if retourner_bytes:
+
+        return fichier_pret, reponse.content
 
     return fichier_pret
 
@@ -2074,9 +2089,12 @@ reconnaissance vocale automatique — elle peut donc contenir
 de légères erreurs de transcription, notamment sur des
 termes médicaux techniques ; utilise ton jugement clinique
 pour corriger silencieusement les erreurs évidentes de ce
-type, ex. un terme médical mal orthographié phonétiquement),
-et éventuellement le texte extrait des diapositives PDF
-("supports") utilisées pendant ce cours.
+type, ex. un terme médical mal orthographié phonétiquement).
+
+Si des PDF de support ("diapositives") existent pour ce
+cours, ils te sont fournis SÉPARÉMENT (en fichiers joints
+directement à cette requête, pas dans le texte ci-dessous) —
+lis-les attentivement, schémas et images compris.
 
 IMPORTANT : certaines informations (listes, exemples,
 pathologies citées) peuvent apparaître UNIQUEMENT dans un
@@ -2097,7 +2115,8 @@ CONTENU DU COURS
 def creer_fiche_finale_texte(
     client,
     contenus_textuels,
-    model_name
+    model_name,
+    fichiers_pdf_gemini=None
 ):
 
     st.write(
@@ -2108,13 +2127,26 @@ def creer_fiche_finale_texte(
 
     prompt = construire_prompt_fiche_texte(contenus_textuels)
 
+    # Les PDF de support sont fournis à Gemini en fichiers
+    # natifs (schémas/images inclus), même en mode gratuit —
+    # seul l'audio est transcrit en local/Groq. L'upload en
+    # lui-même ne consomme aucun quota de generate_content :
+    # ça reste un seul appel, juste avec ces fichiers en plus.
+    if fichiers_pdf_gemini:
+
+        contenu_requete = [prompt] + list(fichiers_pdf_gemini)
+
+    else:
+
+        contenu_requete = prompt
+
 
     try:
 
         reponse = appeler_gemini_avec_reprise(
             client,
             model_name,
-            prompt
+            contenu_requete
         )
 
     except QuotaEpuiseeError:
@@ -2159,7 +2191,8 @@ def creer_fiche_finale_texte(
 def creer_fiche_finale_fichiers(
     client,
     fichiers_geminis,
-    model_name
+    model_name,
+    fichiers_pdf_gemini=None
 ):
 
     st.write(
@@ -2483,7 +2516,12 @@ RÈGLES :
 # initial.
 # ============================================================
 
-def creer_fiche_depuis_notes(client, notes_par_lot, model_name):
+def creer_fiche_depuis_notes(
+    client,
+    notes_par_lot,
+    model_name,
+    fichiers_pdf_gemini=None
+):
 
     st.write(
         "### 🧠 Fusion des lots et création de la fiche "
@@ -2532,12 +2570,21 @@ NOTES DES DIFFÉRENTS LOTS
 """ + STRUCTURE_ET_REGLES_FICHE
 
 
+    if fichiers_pdf_gemini:
+
+        contenu_requete = [prompt] + list(fichiers_pdf_gemini)
+
+    else:
+
+        contenu_requete = prompt
+
+
     try:
 
         reponse = appeler_gemini_avec_reprise(
             client,
             model_name,
-            prompt
+            contenu_requete
         )
 
     except QuotaEpuiseeError:
@@ -2577,7 +2624,13 @@ NOTES DES DIFFÉRENTS LOTS
 # en sous-lots selon le nombre de fichiers
 # ============================================================
 
-def generer_fiche_finale(client, contenus, model_name, mode):
+def generer_fiche_finale(
+    client,
+    contenus,
+    model_name,
+    mode,
+    fichiers_pdf_gemini=None
+):
 
     if mode == "rapide":
 
@@ -2590,12 +2643,23 @@ def generer_fiche_finale(client, contenus, model_name, mode):
         creer_notes_fn = creer_notes_sous_lot_texte
 
 
+    # Les PDF Gemini supplémentaires ne concernent que le mode
+    # gratuit (en mode rapide, les PDF sont déjà mélangés aux
+    # audios dans "contenus"). Ils sont toujours attachés au
+    # DERNIER appel Gemini — direct ou fusion — jamais répétés
+    # dans chaque sous-lot, pour ne pas les envoyer plusieurs
+    # fois inutilement.
+    pdf_pour_appel_direct = (
+        fichiers_pdf_gemini if mode == "gratuit" else None
+    )
+
     if len(contenus) <= TAILLE_MAX_SOUS_LOT:
 
         return creer_fiche_fn(
             client,
             contenus,
-            model_name
+            model_name,
+            pdf_pour_appel_direct
         )
 
 
@@ -2649,11 +2713,14 @@ def generer_fiche_finale(client, contenus, model_name, mode):
     # La fusion depuis les notes est toujours en texte seul,
     # quel que soit le mode d'origine (audio/PDF ou
     # transcription) — les notes de sous-lots sont déjà du
-    # texte dans les deux cas.
+    # texte dans les deux cas. Les PDF Gemini (mode gratuit),
+    # eux, n'ont pas été inclus dans les sous-lots — on les
+    # attache ici, à ce dernier appel.
     return creer_fiche_depuis_notes(
         client,
         notes_par_lot,
-        model_name
+        model_name,
+        pdf_pour_appel_direct
     )
 
 
@@ -4064,9 +4131,14 @@ https://aistudio.google.com/apikey
     contenus_a_traiter = []
 
     # Octets bruts des PDF de support (mode gratuit uniquement)
-    # — sert uniquement à alimenter le cache partagé avec le
-    # bouton "sans IA", pas envoyé à Gemini.
+    # — alimente le cache partagé avec le bouton "sans IA".
     pdfs_bruts_gratuit = []
+
+    # Fichiers Gemini des PDF de support (mode gratuit) — les
+    # PDF sont désormais envoyés à Gemini en fichiers natifs
+    # (schémas/images inclus), pas seulement en texte extrait.
+    # Attachés au dernier appel Gemini par generer_fiche_finale.
+    fichiers_pdf_gemini_gratuit = []
 
 
     # ========================================================
@@ -4229,22 +4301,24 @@ https://aistudio.google.com/apikey
 
                 if mode_traitement == "gratuit":
 
-                    texte_pdf, octets_pdf = (
-                        telecharger_et_extraire_pdf(
+                    # PDF envoyé à Gemini en fichier natif
+                    # (schémas/images inclus) — un seul appel
+                    # generate_content au total malgré tout,
+                    # l'upload de fichier n'y est pas soumis.
+                    fichier_pdf_gemini, octets_pdf = (
+                        telecharger_et_uploader_pdf(
                             url_pdf,
                             j + 1,
                             session,
+                            client,
                             retourner_bytes=True
                         )
                     )
 
-                    if texte_pdf:
+                    if fichier_pdf_gemini:
 
-                        contenus_a_traiter.append(
-                            f"==========================\n"
-                            f"SUPPORT PDF {j + 1}\n"
-                            f"==========================\n\n"
-                            f"{texte_pdf}"
+                        fichiers_pdf_gemini_gratuit.append(
+                            fichier_pdf_gemini
                         )
 
                     if octets_pdf:
@@ -4277,7 +4351,9 @@ https://aistudio.google.com/apikey
         # textuels, réutilisables tels quels pour le .txt/.zip)
         # ----------------------------------------------------
 
-        if mode_traitement == "gratuit" and contenus_a_traiter:
+        if mode_traitement == "gratuit" and (
+            contenus_a_traiter or pdfs_bruts_gratuit
+        ):
 
             ecrire_cache_collecte(
                 urls_brutes_saisies,
@@ -4291,7 +4367,7 @@ https://aistudio.google.com/apikey
         # VÉRIFICATION
         # ====================================================
 
-        if not contenus_a_traiter:
+        if not contenus_a_traiter and not fichiers_pdf_gemini_gratuit:
 
             status.update(
                 label="❌ Aucun cours analysé",
@@ -4301,7 +4377,7 @@ https://aistudio.google.com/apikey
 
             st.error(
                 """
-Aucune transcription ni aucun texte de support n'a pu être
+Aucune transcription ni aucun support PDF n'a pu être
 obtenu.
 
 Vérifie notamment que les URL contiennent bien
@@ -4324,7 +4400,8 @@ un lien vers un fichier MP3 accessible.
                 client,
                 contenus_a_traiter,
                 modele_choisi,
-                mode_traitement
+                mode_traitement,
+                fichiers_pdf_gemini_gratuit
             )
 
         except (
@@ -4339,6 +4416,14 @@ un lien vers un fichier MP3 accessible.
             # refaire.
             st.session_state["contenus_textuels_en_attente"] = (
                 contenus_a_traiter
+            )
+
+            st.session_state["pdfs_bruts_en_attente"] = (
+                pdfs_bruts_gratuit
+            )
+
+            st.session_state["fichiers_pdf_gemini_en_attente"] = (
+                fichiers_pdf_gemini_gratuit
             )
 
             st.session_state["mode_en_attente"] = mode_traitement
@@ -4391,6 +4476,14 @@ un lien vers un fichier MP3 accessible.
                 contenus_a_traiter
             )
 
+            st.session_state["pdfs_bruts_en_attente"] = (
+                pdfs_bruts_gratuit
+            )
+
+            st.session_state["fichiers_pdf_gemini_en_attente"] = (
+                fichiers_pdf_gemini_gratuit
+            )
+
             st.session_state["mode_en_attente"] = mode_traitement
 
             st.session_state["modele_echoue"] = modele_choisi
@@ -4408,20 +4501,27 @@ un lien vers un fichier MP3 accessible.
             st.rerun()
 
 
-        # Nettoyage des fichiers Gemini (mode rapide
-        # uniquement — en mode gratuit, ce ne sont que des
-        # chaînes de texte, rien à supprimer côté Gemini).
+        # Nettoyage des fichiers Gemini : en mode rapide, tout
+        # contenus_a_traiter ; en mode gratuit, uniquement les
+        # PDF (les transcriptions restent de simples chaînes,
+        # rien à supprimer côté Gemini pour elles).
         if mode_traitement == "rapide":
 
-            for element in contenus_a_traiter:
+            elements_a_nettoyer = contenus_a_traiter
 
-                try:
+        else:
 
-                    client.files.delete(name=element.name)
+            elements_a_nettoyer = fichiers_pdf_gemini_gratuit
 
-                except Exception:
+        for element in elements_a_nettoyer:
 
-                    pass
+            try:
+
+                client.files.delete(name=element.name)
+
+            except Exception:
+
+                pass
 
 
         duree_totale = time.time() - debut_total
@@ -4492,24 +4592,39 @@ if st.session_state.get("contenus_textuels_en_attente"):
     # envoyés à Gemini — donc exportables tels quels. En mode
     # ⚡ rapide, les contenus sont des références de fichiers
     # Gemini déjà uploadés : rien de local à proposer ici.
+    # Même .zip (transcriptions .txt + PDF originaux) que le
+    # bouton "sans IA", pour que l'utilisateur retrouve
+    # exactement les mêmes fichiers, qu'il ait cliqué sur
+    # "sans IA" directement ou qu'il soit tombé sur le mur de
+    # la surcharge Gemini.
     if mode_en_attente_export == "gratuit":
 
-        prompt_a_exporter = construire_prompt_fiche_texte(
-            st.session_state["contenus_textuels_en_attente"]
+        zip_a_exporter, _ = empaqueter_zip(
+            st.session_state["contenus_textuels_en_attente"],
+            st.session_state.get("pdfs_bruts_en_attente", []),
+            st.session_state.get(
+                "titre_cours_en_attente", "Cours"
+            )
         )
 
         st.download_button(
             label=(
-                "📥 Télécharger les transcriptions "
-                "(prêtes à coller dans une autre IA)"
+                "📥 Télécharger les documents "
+                "(transcriptions + PDF)"
             ),
-            data=prompt_a_exporter,
-            file_name="transcriptions_cours_ifsi.txt",
-            mime="text/plain",
+            data=zip_a_exporter,
+            file_name=(
+                nettoyer_nom_fichier(
+                    st.session_state.get(
+                        "titre_cours_en_attente", "Cours"
+                    )
+                ) + "_documents.zip"
+            ),
+            mime="application/zip",
             help=(
                 "Contient les transcriptions, les supports PDF "
                 "et les consignes déjà rédigées pour la fiche — "
-                "colle ce fichier tel quel dans ChatGPT, Claude, "
+                "colle le .txt tel quel dans ChatGPT, Claude, "
                 "Gemini web, etc."
             )
         )
@@ -4558,6 +4673,10 @@ if st.session_state.get("contenus_textuels_en_attente"):
                     "contenus_textuels_en_attente"
                 ]
 
+                pdf_gemini_en_attente = st.session_state.get(
+                    "fichiers_pdf_gemini_en_attente", []
+                )
+
                 mode_en_attente = st.session_state.get(
                     "mode_en_attente", "gratuit"
                 )
@@ -4580,7 +4699,8 @@ if st.session_state.get("contenus_textuels_en_attente"):
                             client_reprise,
                             contenus_en_attente,
                             modele_secours,
-                            mode_en_attente
+                            mode_en_attente,
+                            pdf_gemini_en_attente
                         )
 
                     except QuotaEpuiseeError:
@@ -4610,22 +4730,30 @@ if st.session_state.get("contenus_textuels_en_attente"):
 
                 if fiche_reprise:
 
-                    # Succès : nettoyage des fichiers Gemini
-                    # si mode rapide, sauvegarde du résultat,
-                    # fin de la chaîne.
+                    # Succès : nettoyage des fichiers Gemini —
+                    # tout contenus_en_attente en mode rapide,
+                    # seulement les PDF en mode gratuit.
                     if mode_en_attente == "rapide":
 
-                        for element in contenus_en_attente:
+                        elements_a_nettoyer = contenus_en_attente
 
-                            try:
+                    else:
 
-                                client_reprise.files.delete(
-                                    name=element.name
-                                )
+                        elements_a_nettoyer = (
+                            pdf_gemini_en_attente
+                        )
 
-                            except Exception:
+                    for element in elements_a_nettoyer:
 
-                                pass
+                        try:
+
+                            client_reprise.files.delete(
+                                name=element.name
+                            )
+
+                        except Exception:
+
+                            pass
 
                     del st.session_state[
                         "contenus_textuels_en_attente"
@@ -4639,6 +4767,14 @@ if st.session_state.get("contenus_textuels_en_attente"):
 
                     st.session_state.pop(
                         "mode_en_attente", None
+                    )
+
+                    st.session_state.pop(
+                        "pdfs_bruts_en_attente", None
+                    )
+
+                    st.session_state.pop(
+                        "fichiers_pdf_gemini_en_attente", None
                     )
 
                     titre_cours_attente = st.session_state.pop(
@@ -4684,21 +4820,32 @@ if st.session_state.get("contenus_textuels_en_attente"):
                     else:
 
                         # Fin de la chaîne : on abandonne, et
-                        # on nettoie les fichiers Gemini si
-                        # mode rapide.
+                        # on nettoie les fichiers Gemini restants
+                        # (tout en mode rapide, PDF seulement en
+                        # mode gratuit).
                         if mode_en_attente == "rapide":
 
-                            for element in contenus_en_attente:
+                            elements_a_nettoyer = (
+                                contenus_en_attente
+                            )
 
-                                try:
+                        else:
 
-                                    client_reprise.files.delete(
-                                        name=element.name
-                                    )
+                            elements_a_nettoyer = (
+                                pdf_gemini_en_attente
+                            )
 
-                                except Exception:
+                        for element in elements_a_nettoyer:
 
-                                    pass
+                            try:
+
+                                client_reprise.files.delete(
+                                    name=element.name
+                                )
+
+                            except Exception:
+
+                                pass
 
                         del st.session_state[
                             "contenus_textuels_en_attente"
@@ -4712,6 +4859,15 @@ if st.session_state.get("contenus_textuels_en_attente"):
 
                         st.session_state.pop(
                             "mode_en_attente", None
+                        )
+
+                        st.session_state.pop(
+                            "pdfs_bruts_en_attente", None
+                        )
+
+                        st.session_state.pop(
+                            "fichiers_pdf_gemini_en_attente",
+                            None
                         )
 
                         st.session_state.pop(
