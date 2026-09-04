@@ -2027,21 +2027,17 @@ RÈGLES
 TAILLE_MAX_SOUS_LOT = 10
 
 
-def creer_fiche_finale_texte(
-    client,
-    contenus_textuels,
-    model_name
-):
+def construire_prompt_fiche_texte(contenus_textuels):
 
-    st.write(
-        "### 🧠 Analyse des transcriptions et création de "
-        "la fiche de révision"
-    )
-
+    # Isolé de creer_fiche_finale_texte() pour pouvoir réutiliser
+    # exactement le même prompt (consignes + contenu) dans le
+    # bouton de téléchargement de secours — l'utilisateur doit
+    # pouvoir coller tel quel dans une autre IA, sans reconstruire
+    # les instructions lui-même.
 
     contenu_source = "\n\n".join(contenus_textuels)
 
-    prompt = f"""
+    return f"""
 Tu es un formateur expert en Institut de Formation
 en Soins Infirmiers (IFSI).
 
@@ -2074,6 +2070,21 @@ CONTENU DU COURS
 
 {contenu_source}
 """ + STRUCTURE_ET_REGLES_FICHE
+
+
+def creer_fiche_finale_texte(
+    client,
+    contenus_textuels,
+    model_name
+):
+
+    st.write(
+        "### 🧠 Analyse des transcriptions et création de "
+        "la fiche de révision"
+    )
+
+
+    prompt = construire_prompt_fiche_texte(contenus_textuels)
 
 
     try:
@@ -4089,6 +4100,38 @@ if st.session_state.get("contenus_textuels_en_attente"):
             "❌ La création de la fiche a échoué pour une "
             "raison imprévue. Tes transcriptions sont "
             "conservées."
+        )
+
+    mode_en_attente_export = st.session_state.get(
+        "mode_en_attente", "gratuit"
+    )
+
+    # Filet de sécurité indépendant de Gemini : uniquement en
+    # mode 🆓 gratuit, les contenus en attente sont du texte
+    # brut (transcriptions + PDF), pas des fichiers déjà
+    # envoyés à Gemini — donc exportables tels quels. En mode
+    # ⚡ rapide, les contenus sont des références de fichiers
+    # Gemini déjà uploadés : rien de local à proposer ici.
+    if mode_en_attente_export == "gratuit":
+
+        prompt_a_exporter = construire_prompt_fiche_texte(
+            st.session_state["contenus_textuels_en_attente"]
+        )
+
+        st.download_button(
+            label=(
+                "📥 Télécharger les transcriptions "
+                "(prêtes à coller dans une autre IA)"
+            ),
+            data=prompt_a_exporter,
+            file_name="transcriptions_cours_ifsi.txt",
+            mime="text/plain",
+            help=(
+                "Contient les transcriptions, les supports PDF "
+                "et les consignes déjà rédigées pour la fiche — "
+                "colle ce fichier tel quel dans ChatGPT, Claude, "
+                "Gemini web, etc."
+            )
         )
 
     modele_echoue = st.session_state.get("modele_echoue")
