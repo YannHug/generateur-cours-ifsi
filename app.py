@@ -369,6 +369,46 @@ def est_lien_pdf(url):
     return analyse.path.lower().endswith(".pdf")
 
 
+# ============================================================
+# FONCTION : DÉTECTER UN LIEN OPENCAST/PAELLA
+# ============================================================
+#
+# Certaines UE utilisent Opencast (lecteur "Paella") plutôt
+# que Nudgis/MyVideo — plateforme entièrement différente, avec
+# sa propre API. Détection par motif (paella + id=), pas par
+# domaine précis, pour fonctionner sur n'importe quelle instance
+# Opencast (chaque université héberge la sienne), pas seulement
+# celle rencontrée pour l'instant.
+# ============================================================
+
+def est_lien_opencast(url):
+
+    try:
+
+        analyse = urllib.parse.urlparse(url)
+
+    except Exception:
+
+        return False
+
+    if "paella" not in analyse.path.lower():
+
+        return False
+
+    params = urllib.parse.parse_qs(analyse.query)
+
+    return bool(params.get("id", [None])[0])
+
+
+def extraire_id_opencast(url):
+
+    analyse = urllib.parse.urlparse(url)
+
+    params = urllib.parse.parse_qs(analyse.query)
+
+    return params["id"][0]
+
+
 def extraire_liens_videos_page(url_page, session):
 
     try:
@@ -414,7 +454,9 @@ def extraire_liens_videos_page(url_page, session):
             continue
 
 
-        if est_lien_video_direct(href_absolu):
+        if est_lien_video_direct(href_absolu) or est_lien_opencast(
+            href_absolu
+        ):
 
             deja_vus.add(href_absolu)
 
@@ -426,6 +468,29 @@ def extraire_liens_videos_page(url_page, session):
 
             liens_pdf.append(href_absolu)
 
+
+    # Les lecteurs Opencast/Paella sont le plus souvent intégrés
+    # en <iframe>, pas en lien cliquable <a> — contrairement à
+    # Nudgis/MyVideo. On les cherche donc séparément.
+    for cadre in soup.find_all(
+        "iframe",
+        src=True
+    ):
+
+        src_absolu = urllib.parse.urljoin(
+            url_page,
+            cadre["src"]
+        )
+
+        if src_absolu in deja_vus:
+
+            continue
+
+        if est_lien_opencast(src_absolu):
+
+            deja_vus.add(src_absolu)
+
+            liens_videos.append(src_absolu)
 
     titre = extraire_titre_page(soup)
 
@@ -440,7 +505,7 @@ def developper_urls(urls, session):
 
     for url in urls:
 
-        if est_lien_video_direct(url):
+        if est_lien_video_direct(url) or est_lien_opencast(url):
 
             urls_finales.append(url)
 
@@ -958,10 +1023,179 @@ def recuperer_audio_via_modes(url_page, index, session):
 
 
 # ============================================================
+# FONCTION : RÉCUPÉRER L'AUDIO — PLATEFORME OPENCAST
+# ============================================================
+#
+# Opencast expose une API publique "Search" standard (utilisée
+# par toutes les instances Opencast, documentée ici :
+# https://docs.opencast.org/develop/developer/#api/search-api/)
+# qui renvoie, pour un épisode publié, la liste de ses pistes
+# média (audio et/ou vidéo) sans authentification.
+#
+# ⚠️ Non testé en conditions réelles (accès direct au serveur
+# bloqué depuis cet environnement) — à valider sur un vrai lien.
+# Si ça échoue, le message d'erreur affichera la réponse brute
+# de l'API pour pouvoir ajuster.
+# ============================================================
+
+def recuperer_audio_opencast(url_page, index, session):
+
+    id_episode = extraire_id_opencast(url_page)
+
+    analyse = urllib.parse.urlparse(url_page)
+
+    base = f"{analyse.scheme}://{analyse.netloc}"
+
+    url_api = (
+        f"{base}/search/episode.json?id={id_episode}"
+    )
+
+    st.write(
+        f"🔎 Interrogation de l'API Opencast pour "
+        f"l'épisode {index}..."
+    )
+
+    try:
+
+        reponse = session.get(
+            url_api,
+            timeout=30
+        )
+
+        reponse.raise_for_status()
+
+        data = reponse.json()
+
+    except Exception as e:
+
+        st.error(
+            f"❌ Impossible d'interroger l'API Opencast "
+            f"pour l'épisode {index} : {e}"
+        )
+
+        return None
+
+
+    try:
+
+        # Deux formats rencontrés selon les instances Opencast :
+        # certaines enveloppent la réponse dans "search-results"
+        # (ancien format XML→JSON), d'autres renvoient "result"
+        # directement à la racine (ce que renvoie l'UCA).
+        if "search-results" in data:
+
+            resultat = data["search-results"]["result"]
+
+        else:
+
+            resultat = data["result"]
+
+        if isinstance(resultat, list):
+
+            resultat = resultat[0]
+
+        pistes = resultat["mediapackage"]["media"]["track"]
+
+        if isinstance(pistes, dict):
+
+            pistes = [pistes]
+
+    except (KeyError, IndexError, TypeError) as e:
+
+        st.error(
+            f"❌ Réponse Opencast inattendue pour l'épisode "
+            f"{index} ({e}) — impossible d'y trouver les "
+            f"pistes média."
+        )
+
+        st.code(str(data)[:2000])
+
+        return None
+
+
+    if not pistes:
+
+        st.error(
+            f"❌ Aucune piste média trouvée pour l'épisode "
+            f"{index}."
+        )
+
+        return None
+
+
+    # Piste audio seule en priorité (rien à extraire ensuite) ;
+    # sinon la piste vidéo la plus légère, dont on extraira
+    # l'audio via ffmpeg comme pour les autres plateformes.
+    piste_audio = next(
+        (
+            p for p in pistes
+            if str(p.get("mimetype", "")).startswith("audio")
+        ),
+        None
+    )
+
+    if piste_audio:
+
+        url_media = piste_audio.get("url")
+
+        st.write(
+            f"🔗 Piste audio Opencast trouvée pour "
+            f"l'épisode {index}."
+        )
+
+    else:
+
+        def taille_piste(p):
+
+            try:
+
+                return int(p.get("size", float("inf")))
+
+            except (TypeError, ValueError):
+
+                return float("inf")
+
+        piste_video = min(pistes, key=taille_piste)
+
+        url_media = piste_video.get("url")
+
+        st.write(
+            f"🔗 Pas de piste audio seule — piste vidéo la "
+            f"plus légère retenue pour l'épisode {index} "
+            f"(audio à en extraire)."
+        )
+
+
+    if not url_media:
+
+        st.error(
+            f"❌ Aucune URL exploitable trouvée dans les "
+            f"pistes média de l'épisode {index}."
+        )
+
+        return None
+
+
+    return extraire_audio_flux(
+        url_media,
+        index,
+        session
+    )
+
+
+# ============================================================
 # FONCTION : RÉCUPÉRER L'AUDIO (MP3 direct, sinon API modes)
 # ============================================================
 
 def recuperer_audio(url_page, index, session):
+
+    if est_lien_opencast(url_page):
+
+        return recuperer_audio_opencast(
+            url_page,
+            index,
+            session
+        )
 
     st.write(
         "⬇️ Recherche du fichier audio..."
