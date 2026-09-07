@@ -480,15 +480,15 @@ def extraire_id_opencast(url):
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
-def requete_avec_repli_ssl(session, url, **kwargs):
+def requete_avec_repli_ssl(session, url, methode="GET", **kwargs):
 
     try:
 
-        return session.get(url, **kwargs)
+        return session.request(methode, url, **kwargs)
 
     except requests.exceptions.SSLError:
 
-        return session.get(url, verify=False, **kwargs)
+        return session.request(methode, url, verify=False, **kwargs)
 
 
 def est_lien_articulate(url, session):
@@ -506,6 +506,38 @@ def est_lien_articulate(url, session):
     return (
         "data/html/Project.js" in reponse.text
         and "presenter" in reponse.text.lower()
+    )
+
+
+# ============================================================
+# FONCTION : DÉTECTER UNE PAGE ISPRING SUITE
+# ============================================================
+#
+# Troisième plateforme rencontrée (après Opencast et
+# Articulate Presenter) pour ce même type de "ressource web"
+# Claroline zippée. Signature : scripts data/player.js et
+# data/browsersupport.js, plus la mention "iSpring" présente
+# en clair dans le HTML. L'audio est servi en pistes MP3
+# numérotées séquentiellement (data/soundN.mp3), une par
+# diapositive narrée — certaines diapositives peuvent ne pas
+# en avoir (ex. mentions légales).
+# ============================================================
+
+def est_lien_ispring(url, session):
+
+    try:
+
+        reponse = requete_avec_repli_ssl(session, url, timeout=20)
+
+        reponse.raise_for_status()
+
+    except Exception:
+
+        return False
+
+    return (
+        "data/player.js" in reponse.text
+        and "iSpring" in reponse.text
     )
 
 
@@ -596,12 +628,15 @@ def extraire_liens_videos_page(url_page, session):
         ):
 
             # Candidat potentiel : page HTML autonome type
-            # module Articulate Presenter (ex. "ressource web"
-            # Claroline zippée). On ne le confirme qu'avec une
-            # requête réseau ciblée sur ce sous-ensemble précis
-            # de liens — pas sur chaque lien de la page — pour
-            # ne pas multiplier les requêtes inutilement.
-            if est_lien_articulate(href_absolu, session):
+            # module Articulate Presenter ou iSpring Suite
+            # (ex. "ressource web" Claroline zippée). On ne le
+            # confirme qu'avec une requête réseau ciblée sur ce
+            # sous-ensemble précis de liens — pas sur chaque
+            # lien de la page — pour ne pas multiplier les
+            # requêtes inutilement.
+            if est_lien_articulate(
+                href_absolu, session
+            ) or est_lien_ispring(href_absolu, session):
 
                 deja_vus.add(href_absolu)
 
@@ -664,6 +699,23 @@ def developper_urls(urls, session):
 
             st.write(
                 f"🎞️ Module Articulate Presenter détecté : {url}"
+            )
+
+            urls_finales.append(url)
+
+            if titre_cours is None:
+
+                titre_cours = titre_page_articulate(
+                    url,
+                    session
+                )
+
+            continue
+
+        if est_lien_ispring(url, session):
+
+            st.write(
+                f"🎞️ Module iSpring Suite détecté : {url}"
             )
 
             urls_finales.append(url)
@@ -1349,92 +1401,32 @@ def recuperer_audio_opencast(url_page, index, session):
 # audio continu via ffmpeg, dans l'ordre d'apparition.
 # ============================================================
 
-def recuperer_audio_articulate(url_page, index, session):
+def assembler_segments_audio(session, urls_segments, index, prefixe):
 
-    try:
+    # Télécharge une liste de pistes MP3 (dans l'ordre fourni)
+    # et les assemble en un seul fichier audio continu via
+    # ffmpeg. Partagé entre Articulate Presenter et iSpring
+    # Suite — seule la façon de trouver les URL des pistes
+    # diffère entre les deux.
 
-        reponse_page = requete_avec_repli_ssl(
-            session, url_page, timeout=20
-        )
-
-        reponse_page.raise_for_status()
-
-    except Exception as e:
+    if not urls_segments:
 
         st.error(
-            f"❌ Impossible d'accéder au module Articulate "
-            f"{index} : {e}"
-        )
-
-        return None
-
-
-    base = url_page.rsplit("/", 1)[0] + "/"
-
-    url_project_js = urllib.parse.urljoin(
-        base,
-        "data/html/Project.js"
-    )
-
-    try:
-
-        reponse_js = requete_avec_repli_ssl(
-            session, url_project_js, timeout=30
-        )
-
-        reponse_js.raise_for_status()
-
-    except Exception as e:
-
-        st.error(
-            f"❌ Impossible de lire la configuration du module "
-            f"{index} (Project.js) : {e}"
-        )
-
-        return None
-
-
-    noms_mp3 = []
-
-    deja_vus = set()
-
-    for m in re.finditer(
-        r"'([a-zA-Z0-9_\-]+\.mp3)'",
-        reponse_js.text
-    ):
-
-        nom = m.group(1)
-
-        if nom not in deja_vus:
-
-            deja_vus.add(nom)
-
-            noms_mp3.append(nom)
-
-
-    if not noms_mp3:
-
-        st.error(
-            f"❌ Aucune piste audio trouvée dans le module "
+            f"❌ Aucune piste audio trouvée pour le module "
             f"{index}."
         )
 
         return None
 
-
     st.write(
-        f"🔊 {len(noms_mp3)} piste(s) audio trouvée(s) pour "
-        f"le module {index} — téléchargement et assemblage..."
+        f"🔊 {len(urls_segments)} piste(s) audio trouvée(s) "
+        f"pour le module {index} — téléchargement et "
+        f"assemblage..."
     )
 
     fichiers_segments = []
 
-    for i, nom in enumerate(noms_mp3):
-
-        url_segment = urllib.parse.urljoin(
-            base,
-            f"data/{nom}"
-        )
+    for i, url_segment in enumerate(urls_segments):
 
         try:
 
@@ -1447,13 +1439,13 @@ def recuperer_audio_articulate(url_page, index, session):
         except Exception as e:
 
             st.write(
-                f"⚠️ Piste {i + 1}/{len(noms_mp3)} "
-                f"({nom}) inaccessible : {e} — ignorée."
+                f"⚠️ Piste {i + 1}/{len(urls_segments)} "
+                f"inaccessible : {e} — ignorée."
             )
 
             continue
 
-        nom_local = f"articulate_{index}_{i}.mp3"
+        nom_local = f"{prefixe}_{index}_{i}.mp3"
 
         try:
 
@@ -1465,7 +1457,7 @@ def recuperer_audio_articulate(url_page, index, session):
 
             st.write(
                 f"⚠️ Impossible d'enregistrer la piste "
-                f"{i + 1}/{len(noms_mp3)} : {e} — ignorée."
+                f"{i + 1}/{len(urls_segments)} : {e} — ignorée."
             )
 
             continue
@@ -1493,7 +1485,7 @@ def recuperer_audio_articulate(url_page, index, session):
         return None
 
 
-    nom_liste = f"articulate_{index}_liste.txt"
+    nom_liste = f"{prefixe}_{index}_liste.txt"
 
     with open(nom_liste, "w", encoding="utf-8") as f:
 
@@ -1569,6 +1561,152 @@ def recuperer_audio_articulate(url_page, index, session):
     return fichier_final
 
 
+def recuperer_audio_articulate(url_page, index, session):
+
+    try:
+
+        reponse_page = requete_avec_repli_ssl(
+            session, url_page, timeout=20
+        )
+
+        reponse_page.raise_for_status()
+
+    except Exception as e:
+
+        st.error(
+            f"❌ Impossible d'accéder au module Articulate "
+            f"{index} : {e}"
+        )
+
+        return None
+
+
+    base = url_page.rsplit("/", 1)[0] + "/"
+
+    url_project_js = urllib.parse.urljoin(
+        base,
+        "data/html/Project.js"
+    )
+
+    try:
+
+        reponse_js = requete_avec_repli_ssl(
+            session, url_project_js, timeout=30
+        )
+
+        reponse_js.raise_for_status()
+
+    except Exception as e:
+
+        st.error(
+            f"❌ Impossible de lire la configuration du module "
+            f"{index} (Project.js) : {e}"
+        )
+
+        return None
+
+
+    noms_mp3 = []
+
+    deja_vus = set()
+
+    for m in re.finditer(
+        r"'([a-zA-Z0-9_\-]+\.mp3)'",
+        reponse_js.text
+    ):
+
+        nom = m.group(1)
+
+        if nom not in deja_vus:
+
+            deja_vus.add(nom)
+
+            noms_mp3.append(nom)
+
+
+    urls_segments = [
+        urllib.parse.urljoin(base, f"data/{nom}")
+        for nom in noms_mp3
+    ]
+
+    return assembler_segments_audio(
+        session, urls_segments, index, "articulate"
+    )
+
+
+def recuperer_audio_ispring(url_page, index, session):
+
+    try:
+
+        reponse_page = requete_avec_repli_ssl(
+            session, url_page, timeout=20
+        )
+
+        reponse_page.raise_for_status()
+
+    except Exception as e:
+
+        st.error(
+            f"❌ Impossible d'accéder au module iSpring "
+            f"{index} : {e}"
+        )
+
+        return None
+
+
+    base = url_page.rsplit("/", 1)[0] + "/"
+
+    # Contrairement à Articulate, pas de fichier de config à
+    # lire : iSpring nomme ses pistes séquentiellement
+    # (sound1.mp3, sound2.mp3, ...), avec parfois des trous
+    # (diapositive sans narration). On sonde donc dans l'ordre,
+    # et on s'arrête après plusieurs échecs consécutifs plutôt
+    # qu'au premier, pour ne pas s'arrêter sur un simple trou.
+
+    st.write(
+        f"🔎 Recherche des pistes audio du module {index}..."
+    )
+
+    urls_segments = []
+
+    echecs_consecutifs = 0
+
+    n = 1
+
+    while echecs_consecutifs < 5 and n <= 200:
+
+        url_segment = urllib.parse.urljoin(
+            base, f"data/sound{n}.mp3"
+        )
+
+        try:
+
+            reponse = requete_avec_repli_ssl(
+                session, url_segment, methode="HEAD", timeout=15
+            )
+
+            if reponse.status_code == 200:
+
+                urls_segments.append(url_segment)
+
+                echecs_consecutifs = 0
+
+            else:
+
+                echecs_consecutifs += 1
+
+        except Exception:
+
+            echecs_consecutifs += 1
+
+        n += 1
+
+
+    return assembler_segments_audio(
+        session, urls_segments, index, "ispring"
+    )
+
+
 # ============================================================
 # FONCTION : RÉCUPÉRER L'AUDIO (MP3 direct, sinon API modes)
 # ============================================================
@@ -1586,6 +1724,14 @@ def recuperer_audio(url_page, index, session):
     if est_lien_articulate(url_page, session):
 
         return recuperer_audio_articulate(
+            url_page,
+            index,
+            session
+        )
+
+    if est_lien_ispring(url_page, session):
+
+        return recuperer_audio_ispring(
             url_page,
             index,
             session
