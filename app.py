@@ -1,5 +1,6 @@
 import streamlit as st
 import requests
+import urllib3
 from bs4 import BeautifulSoup
 from google import genai
 from google.genai import errors as genai_errors
@@ -460,11 +461,41 @@ def extraire_id_opencast(url):
 # n'importe quelle plateforme hébergeant ce type d'export.
 # ============================================================
 
+# ============================================================
+# FONCTION : REQUÊTE AVEC REPLI SSL
+# ============================================================
+#
+# Certains serveurs universitaires (constaté sur
+# clarolineconnect.univ-lyon1.fr) ont une chaîne de certificats
+# incomplète côté serveur : les navigateurs la complètent
+# automatiquement (AIA fetching), mais la vérification stricte
+# de Python/requests échoue avec SSLCertVerificationError même
+# si le certificat lui-même est légitime. On ne retente sans
+# vérification que dans ce cas précis — jamais par défaut —
+# et uniquement pour des ressources publiques déjà identifiées
+# (pages de cours, supports), jamais pour l'envoi de données
+# sensibles.
+# ============================================================
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+
+def requete_avec_repli_ssl(session, url, **kwargs):
+
+    try:
+
+        return session.get(url, **kwargs)
+
+    except requests.exceptions.SSLError:
+
+        return session.get(url, verify=False, **kwargs)
+
+
 def est_lien_articulate(url, session):
 
     try:
 
-        reponse = session.get(url, timeout=20)
+        reponse = requete_avec_repli_ssl(session, url, timeout=20)
 
         reponse.raise_for_status()
 
@@ -472,11 +503,9 @@ def est_lien_articulate(url, session):
 
         return False
 
-    texte = reponse.text
-
     return (
-        "data/html/Project.js" in texte
-        and "presenter" in texte.lower()
+        "data/html/Project.js" in reponse.text
+        and "presenter" in reponse.text.lower()
     )
 
 
@@ -484,7 +513,7 @@ def titre_page_articulate(url, session):
 
     try:
 
-        reponse = session.get(url, timeout=20)
+        reponse = requete_avec_repli_ssl(session, url, timeout=20)
 
         reponse.raise_for_status()
 
@@ -1324,7 +1353,9 @@ def recuperer_audio_articulate(url_page, index, session):
 
     try:
 
-        reponse_page = session.get(url_page, timeout=20)
+        reponse_page = requete_avec_repli_ssl(
+            session, url_page, timeout=20
+        )
 
         reponse_page.raise_for_status()
 
@@ -1347,7 +1378,9 @@ def recuperer_audio_articulate(url_page, index, session):
 
     try:
 
-        reponse_js = session.get(url_project_js, timeout=30)
+        reponse_js = requete_avec_repli_ssl(
+            session, url_project_js, timeout=30
+        )
 
         reponse_js.raise_for_status()
 
@@ -1405,7 +1438,9 @@ def recuperer_audio_articulate(url_page, index, session):
 
         try:
 
-            reponse_seg = session.get(url_segment, timeout=60)
+            reponse_seg = requete_avec_repli_ssl(
+                session, url_segment, timeout=60
+            )
 
             reponse_seg.raise_for_status()
 
