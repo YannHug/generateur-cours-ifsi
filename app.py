@@ -560,6 +560,24 @@ def extraire_liens_videos_page(url_page, session):
 
             liens_pdf.append(href_absolu)
 
+        elif (
+            urllib.parse.urlparse(href_absolu)
+            .path.lower()
+            .endswith((".htm", ".html"))
+        ):
+
+            # Candidat potentiel : page HTML autonome type
+            # module Articulate Presenter (ex. "ressource web"
+            # Claroline zippée). On ne le confirme qu'avec une
+            # requête réseau ciblée sur ce sous-ensemble précis
+            # de liens — pas sur chaque lien de la page — pour
+            # ne pas multiplier les requêtes inutilement.
+            if est_lien_articulate(href_absolu, session):
+
+                deja_vus.add(href_absolu)
+
+                liens_videos.append(href_absolu)
+
 
     # Les lecteurs Opencast/Paella sont le plus souvent intégrés
     # en <iframe>, pas en lien cliquable <a> — contrairement à
