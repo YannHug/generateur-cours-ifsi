@@ -447,6 +447,60 @@ def extraire_id_opencast(url):
     return params["id"][0]
 
 
+# ============================================================
+# FONCTION : DÉTECTER UNE PAGE ARTICULATE PRESENTER
+# ============================================================
+#
+# Certains modules e-learning (ex. Claroline "ressource web"
+# zippée) sont des exports Articulate Presenter : une page
+# HTML autonome (index.htm) avec une piste audio MP3 séparée
+# par diapositive, référencée dans data/html/Project.js.
+# Détection par signature de contenu (présence de Project.js /
+# presenter.js), pas par domaine, pour fonctionner sur
+# n'importe quelle plateforme hébergeant ce type d'export.
+# ============================================================
+
+def est_lien_articulate(url, session):
+
+    try:
+
+        reponse = session.get(url, timeout=20)
+
+        reponse.raise_for_status()
+
+    except Exception:
+
+        return False
+
+    texte = reponse.text
+
+    return (
+        "data/html/Project.js" in texte
+        and "presenter" in texte.lower()
+    )
+
+
+def titre_page_articulate(url, session):
+
+    try:
+
+        reponse = session.get(url, timeout=20)
+
+        reponse.raise_for_status()
+
+        soup = BeautifulSoup(reponse.text, "html.parser")
+
+        if soup.title and soup.title.string:
+
+            return soup.title.string.strip()
+
+    except Exception:
+
+        pass
+
+    return None
+
+
 def extraire_liens_videos_page(url_page, session):
 
     try:
@@ -556,6 +610,23 @@ def developper_urls(urls, session):
             )
 
             pdfs_finaux.append(url)
+
+            continue
+
+        if est_lien_articulate(url, session):
+
+            st.write(
+                f"🎞️ Module Articulate Presenter détecté : {url}"
+            )
+
+            urls_finales.append(url)
+
+            if titre_cours is None:
+
+                titre_cours = titre_page_articulate(
+                    url,
+                    session
+                )
 
             continue
 
@@ -1222,6 +1293,230 @@ def recuperer_audio_opencast(url_page, index, session):
 
 
 # ============================================================
+# FONCTION : RÉCUPÉRER L'AUDIO — MODULE ARTICULATE PRESENTER
+# ============================================================
+#
+# Récupère chaque piste MP3 par diapositive (référencées dans
+# data/html/Project.js, servies depuis data/{fichier}.mp3
+# relativement à la page) et les assemble en un seul fichier
+# audio continu via ffmpeg, dans l'ordre d'apparition.
+# ============================================================
+
+def recuperer_audio_articulate(url_page, index, session):
+
+    try:
+
+        reponse_page = session.get(url_page, timeout=20)
+
+        reponse_page.raise_for_status()
+
+    except Exception as e:
+
+        st.error(
+            f"❌ Impossible d'accéder au module Articulate "
+            f"{index} : {e}"
+        )
+
+        return None
+
+
+    base = url_page.rsplit("/", 1)[0] + "/"
+
+    url_project_js = urllib.parse.urljoin(
+        base,
+        "data/html/Project.js"
+    )
+
+    try:
+
+        reponse_js = session.get(url_project_js, timeout=30)
+
+        reponse_js.raise_for_status()
+
+    except Exception as e:
+
+        st.error(
+            f"❌ Impossible de lire la configuration du module "
+            f"{index} (Project.js) : {e}"
+        )
+
+        return None
+
+
+    noms_mp3 = []
+
+    deja_vus = set()
+
+    for m in re.finditer(
+        r"'([a-zA-Z0-9_\-]+\.mp3)'",
+        reponse_js.text
+    ):
+
+        nom = m.group(1)
+
+        if nom not in deja_vus:
+
+            deja_vus.add(nom)
+
+            noms_mp3.append(nom)
+
+
+    if not noms_mp3:
+
+        st.error(
+            f"❌ Aucune piste audio trouvée dans le module "
+            f"{index}."
+        )
+
+        return None
+
+
+    st.write(
+        f"🔊 {len(noms_mp3)} piste(s) audio trouvée(s) pour "
+        f"le module {index} — téléchargement et assemblage..."
+    )
+
+    fichiers_segments = []
+
+    for i, nom in enumerate(noms_mp3):
+
+        url_segment = urllib.parse.urljoin(
+            base,
+            f"data/{nom}"
+        )
+
+        try:
+
+            reponse_seg = session.get(url_segment, timeout=60)
+
+            reponse_seg.raise_for_status()
+
+        except Exception as e:
+
+            st.write(
+                f"⚠️ Piste {i + 1}/{len(noms_mp3)} "
+                f"({nom}) inaccessible : {e} — ignorée."
+            )
+
+            continue
+
+        nom_local = f"articulate_{index}_{i}.mp3"
+
+        try:
+
+            with open(nom_local, "wb") as f:
+
+                f.write(reponse_seg.content)
+
+        except Exception as e:
+
+            st.write(
+                f"⚠️ Impossible d'enregistrer la piste "
+                f"{i + 1}/{len(noms_mp3)} : {e} — ignorée."
+            )
+
+            continue
+
+        fichiers_segments.append(nom_local)
+
+
+    if not fichiers_segments:
+
+        st.error(
+            f"❌ Aucune piste audio n'a pu être téléchargée "
+            f"pour le module {index}."
+        )
+
+        return None
+
+
+    if shutil.which("ffmpeg") is None:
+
+        st.error(
+            "❌ ffmpeg n'est pas installé — impossible "
+            "d'assembler les pistes audio du module."
+        )
+
+        return None
+
+
+    nom_liste = f"articulate_{index}_liste.txt"
+
+    with open(nom_liste, "w", encoding="utf-8") as f:
+
+        for chemin in fichiers_segments:
+
+            f.write(f"file '{chemin}'\n")
+
+
+    fichier_final = f"cours_ifsi_{index}.mp3"
+
+    commande = [
+        "ffmpeg",
+        "-y",
+        "-f", "concat",
+        "-safe", "0",
+        "-i", nom_liste,
+        "-acodec", "libmp3lame",
+        "-ar", "44100",
+        "-b:a", "128k",
+        fichier_final
+    ]
+
+    try:
+
+        resultat = subprocess.run(
+            commande,
+            capture_output=True,
+            text=True,
+            timeout=300
+        )
+
+    except Exception as e:
+
+        st.error(
+            f"❌ Erreur lors de l'assemblage des pistes audio "
+            f"du module {index} : {e}"
+        )
+
+        resultat = None
+
+    finally:
+
+        for chemin in fichiers_segments + [nom_liste]:
+
+            try:
+
+                os.remove(chemin)
+
+            except Exception:
+
+                pass
+
+
+    if (
+        resultat is None
+        or resultat.returncode != 0
+        or not os.path.exists(fichier_final)
+    ):
+
+        st.error(
+            f"❌ ffmpeg n'a pas réussi à assembler les pistes "
+            f"audio du module {index}."
+        )
+
+        return None
+
+
+    st.success(
+        f"✅ Audio du module {index} assemblé "
+        f"({len(fichiers_segments)} piste(s))."
+    )
+
+    return fichier_final
+
+
+# ============================================================
 # FONCTION : RÉCUPÉRER L'AUDIO (MP3 direct, sinon API modes)
 # ============================================================
 
@@ -1230,6 +1525,14 @@ def recuperer_audio(url_page, index, session):
     if est_lien_opencast(url_page):
 
         return recuperer_audio_opencast(
+            url_page,
+            index,
+            session
+        )
+
+    if est_lien_articulate(url_page, session):
+
+        return recuperer_audio_articulate(
             url_page,
             index,
             session
