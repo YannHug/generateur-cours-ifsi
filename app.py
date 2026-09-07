@@ -240,6 +240,44 @@ DOMAINES_VIDEO = [
 ]
 
 
+# ============================================================
+# FONCTION : SÉPARER DES URL COLLÉES SANS RETOUR À LA LIGNE
+# ============================================================
+#
+# Si l'utilisateur oublie de mettre chaque URL sur sa propre
+# ligne (copier-coller depuis un endroit qui aplatit les
+# retours à la ligne, par exemple), on retombe sur un seul
+# gros bloc "https://...https://...". On découpe alors à
+# chaque nouvelle occurrence de "http://" ou "https://",
+# en plus du découpage normal par ligne.
+# ============================================================
+
+def separer_urls_collees(texte_urls):
+
+    lignes = [
+        ligne.strip()
+        for ligne in texte_urls.splitlines()
+        if ligne.strip()
+    ]
+
+    urls = []
+
+    for ligne in lignes:
+
+        morceaux = re.split(
+            r"(?=https?://)",
+            ligne
+        )
+
+        urls.extend(
+            morceau.strip()
+            for morceau in morceaux
+            if morceau.strip()
+        )
+
+    return urls
+
+
 def nettoyer_nom_fichier(titre):
 
     if not titre:
@@ -4196,11 +4234,7 @@ with colonne_sans_ia:
 
 if telechargement_demande:
 
-    urls_zip = [
-        url.strip()
-        for url in urls_input.splitlines()
-        if url.strip()
-    ]
+    urls_zip = separer_urls_collees(urls_input)
 
     if not urls_zip:
 
@@ -4244,11 +4278,7 @@ if bouton_generer:
     # URL
     # --------------------------------------------------------
 
-    urls = [
-        url.strip()
-        for url in urls_input.splitlines()
-        if url.strip()
-    ]
+    urls = separer_urls_collees(urls_input)
 
 
     if not urls:
