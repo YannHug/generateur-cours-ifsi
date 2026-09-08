@@ -14,6 +14,8 @@ import subprocess
 import shutil
 import glob
 import zipfile
+import base64
+import streamlit.components.v1 as components
 from docx import Document
 from docx.shared import Pt, RGBColor
 from docx.oxml.ns import qn
@@ -296,6 +298,34 @@ def nettoyer_nom_fichier(titre):
         nom = nom[:120].rstrip()
 
     return nom or "Cours_IFSI"
+
+
+# ============================================================
+# FONCTION : TÉLÉCHARGEMENT AUTOMATIQUE
+# ============================================================
+#
+# Dès qu'un fichier est prêt, on déclenche son téléchargement
+# sans attendre un clic — évite de perdre le résultat si la
+# page se rafraîchit avant que l'utilisateur ait eu le temps
+# de cliquer sur le bouton (qui reste affiché juste après, en
+# secours, si le navigateur bloque le téléchargement
+# automatique — cas rare mais possible selon les réglages).
+# ============================================================
+
+def declencher_telechargement_auto(donnees, nom_fichier, mime):
+
+    b64 = base64.b64encode(donnees).decode()
+
+    components.html(
+        f"""
+        <a id="dl" href="data:{mime};base64,{b64}"
+           download="{nom_fichier}" style="display:none;"></a>
+        <script>
+            document.getElementById("dl").click();
+        </script>
+        """,
+        height=0
+    )
 
 
 def titre_depuis_url_fichier(url):
@@ -4504,7 +4534,14 @@ def ecrire_cache_collecte(
     }
 
 
-def collecter_et_empaqueter_sans_ia(urls_brutes, cle_api_groq):
+def collecter_documents_page(urls_brutes, cle_api_groq):
+
+    # Cœur de la collecte "sans Gemini" pour un ensemble d'URL
+    # (typiquement : une seule page de cours). Isolé pour être
+    # réutilisable à la fois par le bouton unique existant et
+    # par la file de pages (une fiche/un zip par page).
+    # Retourne (contenus_textuels, pdfs_bruts, titre_cours),
+    # ou (None, None, None) si rien n'a pu être collecté.
 
     cache = lire_cache_collecte(urls_brutes)
 
@@ -4516,14 +4553,10 @@ def collecter_et_empaqueter_sans_ia(urls_brutes, cle_api_groq):
             "téléchargement ni appel réseau."
         )
 
-        contenus_textuels = cache["contenus_textuels"]
-        pdfs_bruts = cache["pdfs_bruts"]
-        titre_cours = cache["titre_cours"]
-
-        return empaqueter_zip(
-            contenus_textuels,
-            pdfs_bruts,
-            titre_cours
+        return (
+            cache["contenus_textuels"],
+            cache["pdfs_bruts"],
+            cache["titre_cours"]
         )
 
 
@@ -4543,14 +4576,14 @@ def collecter_et_empaqueter_sans_ia(urls_brutes, cle_api_groq):
         session
     )
 
-    if not urls:
+    if not urls and not pdfs_detectes:
 
         st.error(
-            "❌ Aucun lien vidéo n'a pu être trouvé à partir "
-            "des URL fournies."
+            "❌ Aucun lien vidéo ni PDF n'a pu être trouvé à "
+            "partir des URL fournies."
         )
 
-        return None, None
+        return None, None, None
 
 
     contenus_textuels = []
@@ -4658,7 +4691,7 @@ def collecter_et_empaqueter_sans_ia(urls_brutes, cle_api_groq):
                 "n'a pu être obtenu."
             )
 
-            return None, None
+            return None, None, None
 
         status.update(
             label="✅ Documents collectés avec succès !",
@@ -4673,6 +4706,18 @@ def collecter_et_empaqueter_sans_ia(urls_brutes, cle_api_groq):
         titre_cours
     )
 
+    return contenus_textuels, pdfs_bruts, titre_cours
+
+
+def collecter_et_empaqueter_sans_ia(urls_brutes, cle_api_groq):
+
+    contenus_textuels, pdfs_bruts, titre_cours = (
+        collecter_documents_page(urls_brutes, cle_api_groq)
+    )
+
+    if not contenus_textuels and not pdfs_bruts:
+
+        return None, None
 
     return empaqueter_zip(
         contenus_textuels,
@@ -4712,6 +4757,377 @@ def empaqueter_zip(contenus_textuels, pdfs_bruts, titre_cours):
     tampon_zip.seek(0)
 
     return tampon_zip.getvalue(), titre_cours
+
+
+# ============================================================
+# FILE DE PAGES — traitement indépendant, une fiche par page
+# ============================================================
+#
+# Contrairement au champ principal (qui fusionne tout en un
+# seul cours), ici chaque URL de la file est une page à part
+# entière : ses propres vidéos + PDF, sa propre fiche/zip,
+# aucun mélange entre pages. Traité séquentiellement, comme
+# une file d'attente. Un échec sur une page n'interrompt pas
+# les suivantes — il est juste signalé à la fin.
+# ============================================================
+
+def obtenir_api_key_gemini(cle_api_utilisateur):
+
+    api_key = (
+        cle_api_utilisateur.strip()
+        if cle_api_utilisateur
+        else None
+    )
+
+    if not api_key:
+
+        try:
+
+            api_key = st.secrets["GEMINI_API_KEY"]
+
+        except Exception:
+
+            api_key = None
+
+    return api_key
+
+
+def collecter_documents_page_gemini(
+    url_page,
+    session,
+    client,
+    cle_api_groq,
+    mode_traitement
+):
+
+    # Équivalent, pour UNE page, de la collecte du pipeline
+    # principal (audio + PDF), mais destinée à un appel Gemini
+    # (donc contenus = textes ou fichiers Gemini selon le mode,
+    # jamais du texte brut PDF). Retourne
+    # (contenus_a_traiter, fichiers_pdf_gemini, titre_page),
+    # ou (None, None, None) si rien n'a pu être collecté.
+
+    urls, pdfs_detectes, titre_page = developper_urls(
+        [url_page],
+        session
+    )
+
+    if not urls and not pdfs_detectes:
+
+        return None, None, None
+
+    contenus_a_traiter = []
+    fichiers_pdf_gemini = []
+
+    for i, url in enumerate(urls):
+
+        fichier_local = recuperer_audio(url, i, session)
+
+        if not fichier_local:
+
+            st.warning(f"⚠️ Aucun audio trouvé pour : {url}")
+
+            continue
+
+        if ACCELERATION_ACTIVEE:
+
+            fichier_local = accelerer_audio(fichier_local, i + 1)
+
+        if mode_traitement == "gratuit":
+
+            texte_audio = transcrire_audio(
+                fichier_local, i + 1, cle_api_groq
+            )
+
+            try:
+
+                os.remove(fichier_local)
+
+            except Exception:
+
+                pass
+
+            if texte_audio:
+
+                contenus_a_traiter.append(
+                    f"==============================\n"
+                    f"TRANSCRIPTION AUDIO {i + 1}\n"
+                    f"==============================\n\n"
+                    f"{texte_audio}"
+                )
+
+        else:
+
+            fichier_gemini = uploader_audio_gemini(
+                client, fichier_local, i + 1
+            )
+
+            try:
+
+                os.remove(fichier_local)
+
+            except Exception:
+
+                pass
+
+            if fichier_gemini:
+
+                contenus_a_traiter.append(fichier_gemini)
+
+
+    for j, url_pdf in enumerate(pdfs_detectes):
+
+        fichier_pdf_gemini = telecharger_et_uploader_pdf(
+            url_pdf, j + 1, session, client
+        )
+
+        if fichier_pdf_gemini:
+
+            if mode_traitement == "gratuit":
+
+                fichiers_pdf_gemini.append(fichier_pdf_gemini)
+
+            else:
+
+                contenus_a_traiter.append(fichier_pdf_gemini)
+
+
+    if not contenus_a_traiter and not fichiers_pdf_gemini:
+
+        return None, None, None
+
+    return contenus_a_traiter, fichiers_pdf_gemini, titre_page
+
+
+def generer_fiche_avec_repli_automatique(
+    client,
+    contenus,
+    fichiers_pdf_gemini,
+    modele_initial,
+    mode_traitement
+):
+
+    # Comme le bouton "réessayer" du flux principal, mais sans
+    # intervention humaine : essaie automatiquement toute la
+    # chaîne de repli en cas de saturation/indisponibilité —
+    # adapté à un traitement en file où personne ne clique.
+
+    modele = modele_initial
+
+    while modele is not None:
+
+        try:
+
+            fiche = generer_fiche_finale(
+                client,
+                contenus,
+                modele,
+                mode_traitement,
+                fichiers_pdf_gemini
+            )
+
+            return fiche, modele
+
+        except (
+            QuotaEpuiseeError,
+            ModeleIndisponibleError,
+            genai_errors.ServerError
+        ) as e:
+
+            st.warning(
+                f"⚠️ {MODELES_DISPONIBLES.get(modele, modele)} "
+                f"indisponible ({type(e).__name__}) — tentative "
+                f"avec le modèle suivant de la chaîne..."
+            )
+
+            modele = modele_secours_suivant(modele)
+
+    return None, modele_initial
+
+
+def traiter_file_pages_avec_gemini(
+    urls_pages,
+    session,
+    client,
+    cle_api_groq,
+    modele_choisi,
+    mode_traitement
+):
+
+    fichiers_zip = []  # liste de (nom_fichier, octets_docx)
+    echecs = []  # liste de (url, raison)
+
+    for idx, url_page in enumerate(urls_pages):
+
+        st.write(
+            f"# 📄 Page {idx + 1}/{len(urls_pages)}"
+        )
+
+        st.write(f"🔗 {url_page}")
+
+        contenus, fichiers_pdf_gemini, titre_page = (
+            collecter_documents_page_gemini(
+                url_page,
+                session,
+                client,
+                cle_api_groq,
+                mode_traitement
+            )
+        )
+
+        if not contenus and not fichiers_pdf_gemini:
+
+            st.error(
+                "❌ Rien n'a pu être collecté pour cette page "
+                "— passage à la suivante."
+            )
+
+            echecs.append((url_page, "Aucun contenu collecté"))
+
+            continue
+
+        fiche, _ = generer_fiche_avec_repli_automatique(
+            client,
+            contenus or [],
+            fichiers_pdf_gemini or [],
+            modele_choisi,
+            mode_traitement
+        )
+
+        if not fiche:
+
+            st.error(
+                "❌ Échec de génération de la fiche pour cette "
+                "page (chaîne de repli épuisée) — passage à "
+                "la suivante."
+            )
+
+            echecs.append((
+                url_page,
+                "Échec Gemini (chaîne de repli épuisée)"
+            ))
+
+            continue
+
+        nom_base = nettoyer_nom_fichier(titre_page or url_page)
+
+        buffer = creer_word(fiche, sous_titre=nom_base)
+
+        fichiers_zip.append(
+            (f"{idx + 1:02d}_{nom_base}.docx", buffer.getvalue())
+        )
+
+        st.success(
+            f"✅ Fiche générée pour : {titre_page or url_page}"
+        )
+
+
+    if not fichiers_zip:
+
+        return None, 0, len(urls_pages), echecs
+
+    tampon_zip = io.BytesIO()
+
+    with zipfile.ZipFile(
+        tampon_zip, "w", zipfile.ZIP_DEFLATED
+    ) as archive:
+
+        for nom, octets in fichiers_zip:
+
+            archive.writestr(nom, octets)
+
+    tampon_zip.seek(0)
+
+    return (
+        tampon_zip.getvalue(),
+        len(fichiers_zip),
+        len(urls_pages),
+        echecs
+    )
+
+
+def traiter_file_pages_sans_gemini(urls_pages, cle_api_groq):
+
+    fichiers_zip = []  # liste de (nom_dossier, contenu_zip_page)
+    echecs = []
+
+    for idx, url_page in enumerate(urls_pages):
+
+        st.write(
+            f"# 📄 Page {idx + 1}/{len(urls_pages)}"
+        )
+
+        st.write(f"🔗 {url_page}")
+
+        contenus_textuels, pdfs_bruts, titre_page = (
+            collecter_documents_page([url_page], cle_api_groq)
+        )
+
+        if not contenus_textuels and not pdfs_bruts:
+
+            st.error(
+                "❌ Rien n'a pu être collecté pour cette page "
+                "— passage à la suivante."
+            )
+
+            echecs.append((url_page, "Aucun contenu collecté"))
+
+            continue
+
+        nom_base = nettoyer_nom_fichier(titre_page or url_page)
+
+        fichiers_zip.append(
+            (nom_base, contenus_textuels, pdfs_bruts)
+        )
+
+        st.success(
+            f"✅ Documents collectés pour : "
+            f"{titre_page or url_page}"
+        )
+
+
+    if not fichiers_zip:
+
+        return None, 0, len(urls_pages), echecs
+
+    tampon_zip = io.BytesIO()
+
+    with zipfile.ZipFile(
+        tampon_zip, "w", zipfile.ZIP_DEFLATED
+    ) as archive:
+
+        for idx, (nom_base, contenus_textuels, pdfs_bruts) in (
+            enumerate(fichiers_zip)
+        ):
+
+            dossier = f"{idx + 1:02d}_{nom_base}"
+
+            if contenus_textuels:
+
+                prompt_txt = construire_prompt_fiche_texte(
+                    contenus_textuels
+                )
+
+                archive.writestr(
+                    f"{dossier}/transcriptions_cours_ifsi.txt",
+                    prompt_txt
+                )
+
+            for nom_fichier, octets_pdf in pdfs_bruts:
+
+                archive.writestr(
+                    f"{dossier}/{nom_fichier}",
+                    octets_pdf
+                )
+
+    tampon_zip.seek(0)
+
+    return (
+        tampon_zip.getvalue(),
+        len(fichiers_zip),
+        len(urls_pages),
+        echecs
+    )
 
 
 # ============================================================
@@ -4755,13 +5171,21 @@ if telechargement_demande:
 
     if contenu_zip:
 
+        nom_zip_unique = (
+            nettoyer_nom_fichier(titre_cours_zip)
+            + "_documents.zip"
+        )
+
+        declencher_telechargement_auto(
+            contenu_zip,
+            nom_zip_unique,
+            "application/zip"
+        )
+
         st.download_button(
             label="📦 Télécharger le .zip (transcriptions + PDF)",
             data=contenu_zip,
-            file_name=(
-                nettoyer_nom_fichier(titre_cours_zip)
-                + "_documents.zip"
-            ),
+            file_name=nom_zip_unique,
             mime="application/zip"
         )
 
@@ -5375,19 +5799,39 @@ if st.session_state.get("contenus_textuels_en_attente"):
             )
         )
 
+        nom_zip_secours = (
+            nettoyer_nom_fichier(
+                st.session_state.get(
+                    "titre_cours_en_attente", "Cours"
+                )
+            ) + "_documents.zip"
+        )
+
+        # Garde-fou : ce bloc peut se réafficher à chaque
+        # nouvelle tentative de la chaîne de repli — on ne
+        # redéclenche le téléchargement automatique qu'une
+        # seule fois par échec, pas à chaque re-rendu.
+        if not st.session_state.get(
+            "zip_secours_auto_declenche"
+        ):
+
+            declencher_telechargement_auto(
+                zip_a_exporter,
+                nom_zip_secours,
+                "application/zip"
+            )
+
+            st.session_state[
+                "zip_secours_auto_declenche"
+            ] = True
+
         st.download_button(
             label=(
                 "📥 Télécharger les documents "
                 "(transcriptions + PDF)"
             ),
             data=zip_a_exporter,
-            file_name=(
-                nettoyer_nom_fichier(
-                    st.session_state.get(
-                        "titre_cours_en_attente", "Cours"
-                    )
-                ) + "_documents.zip"
-            ),
+            file_name=nom_zip_secours,
             mime="application/zip",
             help=(
                 "Contient les transcriptions, les supports PDF "
@@ -5545,6 +5989,10 @@ if st.session_state.get("contenus_textuels_en_attente"):
                         "fichiers_pdf_gemini_en_attente", None
                     )
 
+                    st.session_state.pop(
+                        "zip_secours_auto_declenche", None
+                    )
+
                     titre_cours_attente = st.session_state.pop(
                         "titre_cours_en_attente",
                         None
@@ -5639,6 +6087,10 @@ if st.session_state.get("contenus_textuels_en_attente"):
                         )
 
                         st.session_state.pop(
+                            "zip_secours_auto_declenche", None
+                        )
+
+                        st.session_state.pop(
                             "titre_cours_en_attente", None
                         )
 
@@ -5680,6 +6132,21 @@ if st.session_state.get("fiche_generee"):
         sous_titre=nom_sans_extension
     )
 
+    # Garde-fou : ce bloc reste affiché tant que la fiche est
+    # en session — on ne redéclenche pas le téléchargement
+    # automatique à chaque re-rendu, seulement à l'apparition
+    # du résultat.
+    if not st.session_state.get("fiche_auto_declenchee"):
+
+        declencher_telechargement_auto(
+            buffer.getvalue(),
+            st.session_state["nom_fichier_docx"],
+            "application/vnd.openxmlformats-"
+            "officedocument.wordprocessingml.document"
+        )
+
+        st.session_state["fiche_auto_declenchee"] = True
+
     colonne_telecharger, colonne_recharger = st.columns(2)
 
     with colonne_telecharger:
@@ -5700,5 +6167,183 @@ if st.session_state.get("fiche_generee"):
 
             st.session_state.pop("fiche_generee", None)
             st.session_state.pop("nom_fichier_docx", None)
+            st.session_state.pop("fiche_auto_declenchee", None)
 
             st.rerun()
+
+
+st.divider()
+
+st.write(
+    "## 📚 File de pages (une fiche indépendante par page)"
+)
+
+st.caption(
+    "Colle plusieurs liens de **pages** de cours (une par "
+    "ligne, ex. plusieurs chapitres Moodle) — contrairement au "
+    "champ principal au-dessus, chaque page est traitée "
+    "**séparément** (ses propres vidéos et PDF), avec sa "
+    "propre fiche. Rien n'est fusionné entre les pages."
+)
+
+pages_file_input = st.text_area(
+    "URL des pages à traiter en file",
+    height=120,
+    key="pages_file_input",
+    placeholder=(
+        "https://moodle.univ-lyon1.fr/mod/book/view.php?"
+        "id=5280&chapterid=133\n"
+        "https://moodle.univ-lyon1.fr/mod/book/view.php?"
+        "id=5280&chapterid=134"
+    )
+)
+
+colonne_file_sans_ia, colonne_file_ia = st.columns(2)
+
+with colonne_file_sans_ia:
+
+    bouton_file_sans_ia = st.button(
+        "📥 Traiter la file sans Gemini (.zip)",
+        key="bouton_file_sans_ia"
+    )
+
+with colonne_file_ia:
+
+    bouton_file_ia = st.button(
+        "🚀 Traiter la file avec Gemini (.zip)",
+        key="bouton_file_ia",
+        type="primary"
+    )
+
+
+def afficher_bilan_file(nb_succes, nb_total, echecs):
+
+    if nb_succes == nb_total:
+
+        st.success(
+            f"🎉 {nb_succes}/{nb_total} page(s) traitée(s) "
+            f"avec succès !"
+        )
+
+    else:
+
+        st.warning(
+            f"⚠️ {nb_succes}/{nb_total} page(s) traitée(s) "
+            f"avec succès."
+        )
+
+        for url_page, raison in echecs:
+
+            st.write(f"- ❌ {url_page} — {raison}")
+
+
+if bouton_file_sans_ia:
+
+    urls_pages = separer_urls_collees(pages_file_input)
+
+    if not urls_pages:
+
+        st.warning("⚠️ Ajoute au moins une URL de page.")
+
+        st.stop()
+
+    contenu_zip, nb_succes, nb_total, echecs = (
+        traiter_file_pages_sans_gemini(urls_pages, cle_api_groq)
+    )
+
+    afficher_bilan_file(nb_succes, nb_total, echecs)
+
+    if contenu_zip:
+
+        declencher_telechargement_auto(
+            contenu_zip,
+            "file_de_pages_documents.zip",
+            "application/zip"
+        )
+
+        st.download_button(
+            label=(
+                f"📦 Télécharger le .zip "
+                f"({nb_succes} page(s))"
+            ),
+            data=contenu_zip,
+            file_name="file_de_pages_documents.zip",
+            mime="application/zip"
+        )
+
+
+if bouton_file_ia:
+
+    urls_pages = separer_urls_collees(pages_file_input)
+
+    if not urls_pages:
+
+        st.warning("⚠️ Ajoute au moins une URL de page.")
+
+        st.stop()
+
+    api_key_file = obtenir_api_key_gemini(cle_api_utilisateur)
+
+    if not api_key_file:
+
+        st.error(
+            """
+❌ Aucune clé API Gemini renseignée.
+
+Colle ta clé dans le champ "🔑 Ta clé API Gemini" ci-dessus.
+"""
+        )
+
+        st.stop()
+
+    try:
+
+        client_file = genai.Client(api_key=api_key_file)
+
+    except Exception as e:
+
+        st.error(f"❌ Impossible de créer le client Gemini : {e}")
+
+        st.stop()
+
+    session_file = requests.Session()
+
+    session_file.headers.update({
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 "
+            "(KHTML, like Gecko) "
+            "Chrome/140.0 Safari/537.36"
+        )
+    })
+
+    contenu_zip, nb_succes, nb_total, echecs = (
+        traiter_file_pages_avec_gemini(
+            urls_pages,
+            session_file,
+            client_file,
+            cle_api_groq,
+            modele_choisi,
+            mode_traitement
+        )
+    )
+
+    afficher_bilan_file(nb_succes, nb_total, echecs)
+
+    if contenu_zip:
+
+        declencher_telechargement_auto(
+            contenu_zip,
+            "file_de_pages_fiches.zip",
+            "application/zip"
+        )
+
+        st.download_button(
+            label=(
+                f"📦 Télécharger le .zip de fiches "
+                f"({nb_succes} page(s))"
+            ),
+            data=contenu_zip,
+            file_name="file_de_pages_fiches.zip",
+            mime="application/zip"
+        )
