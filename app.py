@@ -3133,12 +3133,7 @@ UNIQUEMENT.
 Pour chaque pathologie ou notion abordée dans ce lot, note
 de façon DENSE et STRUCTURÉE (puces courtes, style
 télégraphique, pas de phrases longues ni de mise en forme
-finale) :
-
-- Mécanisme clé (physiopathologie) en une ligne ;
-- Signes cliniques typiques et signes de gravité ;
-- Surveillance infirmière (IDE) pertinente évoquée ;
-- Urgences ou règles cliniques mentionnées.
+finale)
 
 RÈGLES :
 
@@ -3245,12 +3240,7 @@ CE LOT UNIQUEMENT.
 Pour chaque pathologie ou notion abordée dans ce lot, note
 de façon DENSE et STRUCTURÉE (puces courtes, style
 télégraphique, pas de phrases longues ni de mise en forme
-finale) :
-
-- Mécanisme clé (physiopathologie) en une ligne ;
-- Signes cliniques typiques et signes de gravité ;
-- Surveillance infirmière (IDE) pertinente évoquée ;
-- Urgences ou règles cliniques mentionnées.
+finale)
 
 RÈGLES :
 
